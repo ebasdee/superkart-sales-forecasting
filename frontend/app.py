@@ -227,44 +227,66 @@ with single_tab:
             actual = pd.DataFrame(OBSERVED_AVERAGES[store_id][spec["store_key"]],
                                   columns=["input_value", "actual_average", "products"])
 
-            # y-axis spans at least the outlet's typical range, so small effects look small
-            y_low = min(min(predictions), actual["actual_average"].min(), store["p10"]) * 0.95
-            y_high = max(max(predictions), actual["actual_average"].max(), store["p90"]) * 1.05
-            y_scale = alt.Scale(domain=[y_low, y_high])
+            # Both series as % change from their own average, so their trends can be compared on the same footing:
+            # the line is ONE product (other inputs fixed); the squares average ALL the outlet's products in each band.
+            forecast_base = chart_data.loc[chart_data["inside"], "forecast"].mean()
+            chart_data["pct"] = 100 * (chart_data["forecast"] / forecast_base - 1)
+            actual_base = (actual["actual_average"] * actual["products"]).sum() / actual["products"].sum()
+            actual["pct"] = 100 * (actual["actual_average"] / actual_base - 1)
+
+            # y-axis at least +/-10% so small effects look small
+            values = pd.concat([chart_data["pct"], actual["pct"]])
+            y_scale = alt.Scale(domain=[min(-10, values.min() - 2), max(10, values.max() + 2)])
             x_axis = alt.X("input_value:Q", title=choice)
+            y_title = "% above / below average"
 
             band = alt.Chart(pd.DataFrame({"start": [observed_low], "end": [observed_high]})).mark_rect(
                 opacity=0.15, color=BRAND).encode(x="start:Q", x2="end:Q")
+            zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#9CA3AF").encode(y=alt.Y("y:Q", scale=y_scale))
             outside_line = alt.Chart(chart_data).mark_line(color=BRAND_DARK, strokeDash=[4, 4], opacity=0.35).encode(
-                x=x_axis, y=alt.Y("forecast:Q", title="Sales revenue", scale=y_scale))
+                x=x_axis, y=alt.Y("pct:Q", title=y_title, scale=y_scale))
             inside_line = alt.Chart(chart_data[chart_data["inside"]]).mark_line(point=True, color=BRAND_DARK, strokeWidth=3).encode(
-                x=x_axis, y=alt.Y("forecast:Q", scale=y_scale),
+                x=x_axis, y=alt.Y("pct:Q", scale=y_scale),
                 tooltip=[alt.Tooltip("input_value:Q", title=choice, format=",.1f"),
-                         alt.Tooltip("forecast:Q", title="Model forecast", format=",.0f")])
+                         alt.Tooltip("forecast:Q", title="Model forecast", format=",.0f"),
+                         alt.Tooltip("pct:Q", title="% vs average forecast", format="+.1f")])
             actual_points = alt.Chart(actual).mark_point(shape="square", size=90, filled=True, color="#6B7280").encode(
-                x=x_axis, y=alt.Y("actual_average:Q", scale=y_scale),
+                x=x_axis, y=alt.Y("pct:Q", scale=y_scale),
                 tooltip=[alt.Tooltip("input_value:Q", title=f"Band centre ({choice})", format=",.1f"),
                          alt.Tooltip("actual_average:Q", title="Actual average sales", format=",.0f"),
+                         alt.Tooltip("pct:Q", title="% vs outlet average", format="+.1f"),
                          alt.Tooltip("products:Q", title="Products in band")])
             current_value = row[spec["column"]] * spec["scale"]
             marker = alt.Chart(pd.DataFrame({"x": [current_value]})).mark_rule(
                 color=ACCENT, strokeDash=[6, 4], size=2).encode(x="x:Q")
-            st.altair_chart(band + outside_line + inside_line + actual_points + marker, use_container_width=True)
+            st.altair_chart(band + zero + outside_line + inside_line + actual_points + marker, use_container_width=True)
 
-            inside_forecasts = chart_data.loc[chart_data["inside"], "forecast"]
-            change = inside_forecasts.max() - inside_forecasts.min()
-            st.caption(
-                f"**Solid green line:** model forecast within the range of {choice.lower()} actually sold at {store_id} "
-                f"(shaded); **faded dashed line:** outside that range, where the model has no data and cannot extrapolate. "
-                f"**Grey squares:** actual average sales of {store_id}'s products in each band. **Orange dashed line:** "
-                f"your current input. Within the shaded range the forecast moves by **{change:,.0f}** "
-                f"(**{change / store['avg']:.0%}** of an average product at {store_id})."
+            inside = chart_data[chart_data["inside"]]
+            model_low, model_high = inside["pct"].min(), inside["pct"].max()
+            actual_low, actual_high = actual["pct"].min(), actual["pct"].max()
+            st.markdown(
+                f"**Within the range sold at {store_id}:** the forecast for this product moves between "
+                f"**{model_low:+.0f}% and {model_high:+.0f}%** of its average; actual average sales of the outlet's "
+                f"products move between **{actual_low:+.0f}% and {actual_high:+.0f}%** across the bands."
             )
+            if spec["store_key"] == "area" and max(abs(model_low), abs(model_high)) < 5:
+                st.success("Display share has little effect on forecast revenue at this outlet - reallocating shelf space "
+                           "alone is unlikely to move sales; test changes before rolling them out.")
             st.caption(
-                "This shows the model's sensitivity with every other input held fixed - not cause and effect - and it is "
-                "revenue, not profit. In real products weight and price move together (correlation 0.53), so changing one "
-                "alone can create combinations that rarely occur; where the line departs from the grey squares, rely on the squares."
+                "**Solid line:** model forecast for this product (other inputs fixed), within the range actually sold at the "
+                "outlet (shaded); **faded dashed line:** outside that range, where the model has no data. **Grey squares:** "
+                "actual average sales of all the outlet's products in each band. Both are shown as % above/below their own "
+                "average, so compare their **direction and size of change**, not exact values. **Orange line:** your current input."
             )
+            if spec["store_key"] in ("mrp", "weight"):
+                other = "weight" if spec["store_key"] == "mrp" else "MRP"
+                other_value = row["Product_Weight"] if spec["store_key"] == "mrp" else row["Product_MRP"]
+                st.warning(
+                    f"Read with care: in real products price and weight move together (correlation 0.53) and the model uses "
+                    f"their product (MRP x weight). Here {other} stays fixed at {other_value:g}, so the line describes this "
+                    f"product only, while the squares mix products of all {other} levels - the two can differ in shape."
+                )
+            st.caption("Model sensitivity with other inputs held fixed - not cause and effect - and revenue, not profit.")
         except requests.exceptions.RequestException as error:
             st.error(f"The forecasting service could not be reached: {error}")
 
