@@ -1,3 +1,4 @@
+
 import io
 import os
 
@@ -9,7 +10,8 @@ import streamlit as st
 # ----------------------------------------------------------------------------------------------
 # Configuration
 # ----------------------------------------------------------------------------------------------
-# Backend address: the Flask container on the shared Docker network (override with BACKEND_URL)
+# Backend address: the Flask container on the shared Docker network (Codespaces), or the backend
+# Hugging Face Space URL set as the BACKEND_URL variable of the frontend Space
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:7860")
 
 # The ten inputs the deployed model pipeline expects (same columns as the batch file)
@@ -102,7 +104,7 @@ def match_outlet(row):
 def predict_batch(frame):
     """Send rows to the backend batch endpoint; return predictions in row order."""
     csv_bytes = frame[MODEL_COLUMNS].to_csv(index=False).encode("utf-8")
-    response = requests.post(f"{BACKEND_URL}/v1/predictbatch", files={"file": ("batch.csv", csv_bytes)}, timeout=30)
+    response = requests.post(f"{BACKEND_URL}/v1/predictbatch", files={"file": ("batch.csv", csv_bytes)}, timeout=90)
     response.raise_for_status()
     result = response.json()
     return [result[str(i)] for i in range(len(frame))]
@@ -185,11 +187,11 @@ with single_tab:
         st.markdown('<div class="sk-step">3 · Forecast</div>', unsafe_allow_html=True)
         if st.button("Forecast sales revenue", type="primary"):
             try:
-                response = requests.post(f"{BACKEND_URL}/v1/predict", json=row, timeout=30)
+                response = requests.post(f"{BACKEND_URL}/v1/predict", json=row, timeout=90)
                 response.raise_for_status()
                 st.session_state["forecast"] = (row, response.json()["Sales"])
             except requests.exceptions.RequestException as error:
-                st.error(f"The forecasting service could not be reached: {error}")
+                st.error(f"The forecasting service could not be reached: {error}. If it has been idle it may be waking up - please wait a minute and try again.")
 
         if "forecast" in st.session_state and st.session_state["forecast"][0] == row:
             forecast = st.session_state["forecast"][1]
@@ -264,10 +266,13 @@ with single_tab:
             inside = chart_data[chart_data["inside"]]
             model_low, model_high = inside["pct"].min(), inside["pct"].max()
             actual_low, actual_high = actual["pct"].min(), actual["pct"].max()
+            def pct(value):
+                value = round(value)
+                return "0%" if value == 0 else f"{value:+d}%"
             st.markdown(
                 f"**Within the range sold at {store_id}:** the forecast for this product moves between "
-                f"**{model_low:+.0f}% and {model_high:+.0f}%** of its average; actual average sales of the outlet's "
-                f"products move between **{actual_low:+.0f}% and {actual_high:+.0f}%** across the bands."
+                f"**{pct(model_low)} and {pct(model_high)}** of its average; actual average sales of the outlet's "
+                f"products move between **{pct(actual_low)} and {pct(actual_high)}** across the bands."
             )
             if spec["store_key"] == "area" and max(abs(model_low), abs(model_high)) < 5:
                 st.success("Display share has little effect on forecast revenue at this outlet - reallocating shelf space "
@@ -288,7 +293,7 @@ with single_tab:
                 )
             st.caption("Model sensitivity with other inputs held fixed - not cause and effect - and revenue, not profit.")
         except requests.exceptions.RequestException as error:
-            st.error(f"The forecasting service could not be reached: {error}")
+            st.error(f"The forecasting service could not be reached: {error}. If it has been idle it may be waking up - please wait a minute and try again.")
 
 # ---------------------------------------- Batch -----------------------------------------------
 with batch_tab:
@@ -324,4 +329,4 @@ with batch_tab:
 
                 st.download_button("Download results (CSV)", batch.to_csv(index=False), "superkart_forecasts.csv", "text/csv")
             except requests.exceptions.RequestException as error:
-                st.error(f"The forecasting service could not be reached: {error}")
+                st.error(f"The forecasting service could not be reached: {error}. If it has been idle it may be waking up - please wait a minute and try again.")
