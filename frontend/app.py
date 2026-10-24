@@ -54,6 +54,9 @@ WHAT_IF_INPUTS = {
     "Product weight": {"column": "Product_Weight", "range": (4.0, 22.0), "scale": 1, "store_key": "weight"},
 }
 
+# Actual average sales of each outlet's products by band of an input: [band midpoint, average sales, products]
+# (from SuperKart.csv; bands with at least 10 products; display area midpoints in %)
+OBSERVED_AVERAGES = {"OUT001": {"weight": [[9.0, 2606, 104], [11.0, 2753, 277], [13.0, 4072, 421], [15.0, 4440, 676], [17.0, 4502, 100]], "mrp": [[80.0, 2947, 21], [100.0, 2602, 104], [120.0, 2478, 212], [140.0, 3415, 130], [160.0, 4182, 380], [180.0, 4456, 502], [200.0, 4609, 219], [220.0, 4761, 18]], "area": [[0.95, 4020, 165], [3.0, 3910, 372], [5.0, 3886, 300], [7.0, 3922, 254], [9.0, 3965, 140], [11.5, 3954, 180], [15.0, 3856, 115], [19.5, 3877, 49], [26.0, 3903, 11]]}, "OUT002": {"weight": [[7.0, 1378, 134], [9.0, 1787, 490], [11.0, 1944, 413], [13.0, 1583, 70], [15.0, 1395, 31]], "mrp": [[60.0, 982, 49], [80.0, 1497, 185], [100.0, 1877, 474], [120.0, 1971, 312], [140.0, 1772, 62], [160.0, 1151, 33], [180.0, 1465, 18], [200.0, 1570, 13]], "area": [[0.95, 1797, 149], [3.0, 1749, 280], [5.0, 1770, 188], [7.0, 1736, 153], [9.0, 1744, 122], [11.5, 1830, 130], [15.0, 1677, 85], [19.5, 1855, 38]]}, "OUT003": {"weight": [[9.0, 6079, 22], [11.0, 5327, 46], [13.0, 4696, 265], [15.0, 4733, 592], [17.0, 5218, 358], [19.0, 5670, 56]], "mrp": [[100.0, 5862, 11], [120.0, 6025, 30], [140.0, 5138, 48], [160.0, 4566, 315], [180.0, 4707, 477], [200.0, 5152, 299], [220.0, 5551, 136], [240.0, 6130, 26]], "area": [[0.95, 4867, 185], [3.0, 4970, 290], [5.0, 4973, 239], [7.0, 4905, 177], [9.0, 5029, 155], [11.5, 4941, 155], [15.0, 4995, 92], [19.5, 4887, 43], [26.0, 4590, 13]]}, "OUT004": {"weight": [[9.0, 2876, 229], [11.0, 3099, 1657], [13.0, 3398, 2199], [15.0, 3662, 559], [17.0, 3689, 27]], "mrp": [[100.0, 2797, 149], [120.0, 2972, 970], [140.0, 3262, 1974], [160.0, 3566, 1315], [180.0, 3732, 252], [200.0, 3880, 13]], "area": [[0.95, 3299, 541], [3.0, 3292, 1175], [5.0, 3299, 744], [7.0, 3314, 650], [9.0, 3340, 478], [11.5, 3288, 513], [15.0, 3285, 379], [19.5, 3265, 162], [26.0, 3200, 34]]}}
 
 def product_family(product_type):
     """Product family code used by the model (first two letters of Product_Id)."""
@@ -115,6 +118,10 @@ BRAND, BRAND_DARK, BRAND_LIGHT, ACCENT = "#0F7B5C", "#0B5A44", "#E8F3EF", "#F2A5
 st.markdown(f"""
 <style>
     .block-container {{ padding-top: 1.5rem; max-width: 1200px; }}
+    html, body, p, li, label, input, textarea, button, h1, h2, h3, h4, h5, h6,
+    [data-baseweb="select"] > div, [data-baseweb="tab"], [data-testid="stMetricLabel"],
+    [data-testid="stMetricValue"], [data-testid="stCaptionContainer"], [data-testid="stMarkdownContainer"] {{
+        font-family: "Source Sans Pro", "Source Sans 3", -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif; }}
     .sk-header {{ background: linear-gradient(90deg, {BRAND_DARK}, {BRAND}); color: white;
                   padding: 1.2rem 1.6rem; border-radius: 12px; margin-bottom: 1rem; }}
     .sk-header h1 {{ color: white; margin: 0; font-size: 2rem; }}
@@ -214,22 +221,49 @@ with single_tab:
             rows.append(what_if_row)
         try:
             predictions = predict_batch(pd.DataFrame(rows))
-            chart_data = pd.DataFrame({"input_value": grid, "forecast": predictions})
             observed_low, observed_high = (v * spec["scale"] for v in store[spec["store_key"]])
+            chart_data = pd.DataFrame({"input_value": grid, "forecast": predictions})
+            chart_data["inside"] = chart_data["input_value"].between(observed_low, observed_high)
+            actual = pd.DataFrame(OBSERVED_AVERAGES[store_id][spec["store_key"]],
+                                  columns=["input_value", "actual_average", "products"])
+
+            # y-axis spans at least the outlet's typical range, so small effects look small
+            y_low = min(min(predictions), actual["actual_average"].min(), store["p10"]) * 0.95
+            y_high = max(max(predictions), actual["actual_average"].max(), store["p90"]) * 1.05
+            y_scale = alt.Scale(domain=[y_low, y_high])
+            x_axis = alt.X("input_value:Q", title=choice)
+
             band = alt.Chart(pd.DataFrame({"start": [observed_low], "end": [observed_high]})).mark_rect(
-                opacity=0.18, color=BRAND).encode(x="start:Q", x2="end:Q")
-            line = alt.Chart(chart_data).mark_line(point=True, color=BRAND_DARK).encode(
-                x=alt.X("input_value:Q", title=choice),
-                y=alt.Y("forecast:Q", title="Forecast sales revenue", scale=alt.Scale(zero=False)))
+                opacity=0.15, color=BRAND).encode(x="start:Q", x2="end:Q")
+            outside_line = alt.Chart(chart_data).mark_line(color=BRAND_DARK, strokeDash=[4, 4], opacity=0.35).encode(
+                x=x_axis, y=alt.Y("forecast:Q", title="Sales revenue", scale=y_scale))
+            inside_line = alt.Chart(chart_data[chart_data["inside"]]).mark_line(point=True, color=BRAND_DARK, strokeWidth=3).encode(
+                x=x_axis, y=alt.Y("forecast:Q", scale=y_scale),
+                tooltip=[alt.Tooltip("input_value:Q", title=choice, format=",.1f"),
+                         alt.Tooltip("forecast:Q", title="Model forecast", format=",.0f")])
+            actual_points = alt.Chart(actual).mark_point(shape="square", size=90, filled=True, color="#6B7280").encode(
+                x=x_axis, y=alt.Y("actual_average:Q", scale=y_scale),
+                tooltip=[alt.Tooltip("input_value:Q", title=f"Band centre ({choice})", format=",.1f"),
+                         alt.Tooltip("actual_average:Q", title="Actual average sales", format=",.0f"),
+                         alt.Tooltip("products:Q", title="Products in band")])
             current_value = row[spec["column"]] * spec["scale"]
-            marker = alt.Chart(pd.DataFrame({"x": [current_value]})).mark_rule(color=ACCENT, strokeDash=[6, 4], size=2).encode(x="x:Q")
-            st.altair_chart(band + line + marker, use_container_width=True)
-            spread = max(predictions) - min(predictions)
+            marker = alt.Chart(pd.DataFrame({"x": [current_value]})).mark_rule(
+                color=ACCENT, strokeDash=[6, 4], size=2).encode(x="x:Q")
+            st.altair_chart(band + outside_line + inside_line + actual_points + marker, use_container_width=True)
+
+            inside_forecasts = chart_data.loc[chart_data["inside"], "forecast"]
+            change = inside_forecasts.max() - inside_forecasts.min()
             st.caption(
-                f"Shaded band: range of {choice.lower()} actually sold at {store_id}; outside it the model has no data "
-                f"and cannot extrapolate. Dashed orange line: the current input. Across the full range the forecast moves by "
-                f"{spread:,.0f}. This shows the model's sensitivity with all other inputs held fixed - not cause and "
-                "effect - and it is revenue, not profit."
+                f"**Solid green line:** model forecast within the range of {choice.lower()} actually sold at {store_id} "
+                f"(shaded); **faded dashed line:** outside that range, where the model has no data and cannot extrapolate. "
+                f"**Grey squares:** actual average sales of {store_id}'s products in each band. **Orange dashed line:** "
+                f"your current input. Within the shaded range the forecast moves by **{change:,.0f}** "
+                f"(**{change / store['avg']:.0%}** of an average product at {store_id})."
+            )
+            st.caption(
+                "This shows the model's sensitivity with every other input held fixed - not cause and effect - and it is "
+                "revenue, not profit. In real products weight and price move together (correlation 0.53), so changing one "
+                "alone can create combinations that rarely occur; where the line departs from the grey squares, rely on the squares."
             )
         except requests.exceptions.RequestException as error:
             st.error(f"The forecasting service could not be reached: {error}")
