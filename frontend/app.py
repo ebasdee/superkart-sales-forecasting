@@ -293,10 +293,12 @@ with single_tab:
         middle = (bars["start"] + bars["end"]) / 2
         bars["zone"] = ["Bottom 20%" if m < dist["p20"] else "Top 20%" if m >= dist["p80"] else "Middle 60%" for m in middle]
         zone_scale = alt.Scale(domain=["Bottom 20%", "Middle 60%", "Top 20%"], range=[ACCENT, "#B8C4CF", BRAND])
-        histogram = alt.Chart(bars).mark_bar().encode(
+        bars["zero"] = 0
+        histogram = alt.Chart(bars).mark_rect().encode(
             x=alt.X("start:Q", title="Revenue per product at the outlet (actual, historical)"),
             x2="end:Q",
             y=alt.Y("products:Q", title="Number of products"),
+            y2="zero:Q",
             color=alt.Color("zone:N", scale=zone_scale, legend=alt.Legend(title=None, orient="top")),
             tooltip=[alt.Tooltip("start:Q", title="From", format=",.0f"), alt.Tooltip("end:Q", title="To", format=",.0f"),
                      alt.Tooltip("products:Q", title="Products")])
@@ -334,16 +336,16 @@ with batch_tab:
                 in_range = pd.Series(True, index=batch.index)
                 for column, (low, high) in TRAINED_RANGES.items():
                     in_range &= batch[column].between(low, high)
-                batch["Data_Check"] = ["OK" if ok else "outside the trained range - not reliable" for ok in in_range]
+                batch["Data_Check"] = ["OK" if ok else "Outside range" for ok in in_range]
                 tiers, units, ranges = [], [], []
                 for o, f, m, ok in zip(outlets, batch["Forecast_Revenue"], batch["Product_MRP"], in_range):
                     if not ok:
-                        tiers.append("n/a"); units.append(None); ranges.append("n/a")
+                        tiers.append("n/a"); units.append("–"); ranges.append("n/a")
                     elif o:
                         u, lo, hi = stock_range(o, f, m)
-                        tiers.append(tier_of(o, f)[0]); units.append(round(u)); ranges.append(f"{lo:.0f}-{hi:.0f}")
+                        tiers.append(tier_of(o, f)[0]); units.append(str(round(u))); ranges.append(f"{lo:.0f}-{hi:.0f}")
                     else:
-                        tiers.append("n/a"); units.append(round(f / m)); ranges.append("n/a")
+                        tiers.append("n/a"); units.append(str(round(f / m))); ranges.append("n/a")
                 batch["Tier_at_Outlet"] = tiers
                 batch["Units_Estimate"] = units
                 batch["Stock_Range_Units"] = ranges
