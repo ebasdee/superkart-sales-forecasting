@@ -317,12 +317,17 @@ with batch_tab:
                 if "Store_Id" not in batch.columns:
                     batch.insert(0, "Matched_Outlet", [match_outlet(r) or "not a SuperKart outlet" for _, r in batch.iterrows()])
                 st.success(f"Forecast {len(batch)} products - total forecast revenue {batch['Forecast_Revenue'].sum():,.2f}")
-                st.dataframe(batch, use_container_width=True)
+                # Show the forecast next to the outlet (and product id), before the input columns
+                first = [c for c in ["Store_Id", "Matched_Outlet", "Product_Id", "Forecast_Revenue"] if c in batch.columns]
+                batch = batch[first + [c for c in batch.columns if c not in first]]
+                st.dataframe(batch, use_container_width=True,
+                             column_config={"Forecast_Revenue": st.column_config.NumberColumn("Forecast revenue", format="%.2f")})
 
                 outlet_column = "Store_Id" if "Store_Id" in batch.columns else "Matched_Outlet"
                 summary = batch.groupby(outlet_column)["Forecast_Revenue"].agg(Products="count", Total_Forecast_Revenue="sum")
                 st.write("**Forecast revenue by outlet**")
-                st.dataframe(summary.round(2), use_container_width=True)
+                st.dataframe(summary.round(2), use_container_width=True,
+                             column_config={"Total_Forecast_Revenue": st.column_config.NumberColumn("Total forecast revenue", format="%.2f")})
                 if "Matched_Outlet" in batch.columns and (batch["Matched_Outlet"] == "not a SuperKart outlet").any():
                     st.warning("Some rows describe a store profile that is not one of SuperKart's four outlets; "
                                "their forecasts are extrapolations and less reliable.")
