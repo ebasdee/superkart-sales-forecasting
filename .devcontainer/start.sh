@@ -36,8 +36,14 @@ for port in 7860 8501; do
   for _ in $(seq 1 60); do curl -s -o /dev/null "http://localhost:$port" && break; sleep 2; done
 done
 
-# 5. Issue 2 fix: refresh the public port tunnels (a stale tunnel returns an empty 404 after a restart)
+# 5. Issue 2 fix: refresh the public port tunnels (a stale tunnel returns an empty 404 after a restart).
+#    First wait until Codespaces has registered both forwarded ports, then switch them private -> public.
 if [ -n "${CODESPACE_NAME:-}" ]; then
+  for _ in $(seq 1 40); do
+    ports=$(gh codespace ports -c "$CODESPACE_NAME" --json sourcePort -q '.[].sourcePort' 2>/dev/null)
+    echo "$ports" | grep -qx 7860 && echo "$ports" | grep -qx 8501 && break
+    sleep 3
+  done
   for _ in $(seq 1 10); do
     gh codespace ports visibility 7860:private 8501:private -c "$CODESPACE_NAME" >/dev/null 2>&1 \
       && gh codespace ports visibility 7860:public 8501:public -c "$CODESPACE_NAME" >/dev/null 2>&1 \
