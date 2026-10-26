@@ -7,6 +7,7 @@ import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ----------------------------------------------------------------------------------------------
 # Configuration
@@ -14,109 +15,37 @@ import streamlit as st
 # Backend address: the Flask container on the shared Docker network (Codespaces), or the backend
 # Hugging Face Space URL set as the BACKEND_URL variable of the frontend Space
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:7860")
+os.environ.setdefault("BACKEND_URL", BACKEND_URL)        # the assistant's forecast tool calls the same API
 
-# The ten inputs the deployed model pipeline expects (same columns as the batch file)
-MODEL_COLUMNS = [
-    "Product_Weight", "Product_Sugar_Content", "Product_Allocated_Area", "Product_MRP",
-    "Store_Size", "Store_Location_City_Type", "Store_Type",
-    "Product_Id_char", "Store_Age_Years", "Product_Type_Category",
-]
 
 # ----------------------------------------------------------------------------------------------
-# Reference data from the training set (SuperKart.csv) and the model evaluation
-# (mape / err90 / test_rows: average and 90th-percentile % error of the final model on the test set, per outlet)
+# Reference data and planning rules - shared with the planning assistant (assistant_core.py)
 # ----------------------------------------------------------------------------------------------
-# HELPERS-START
 # All reference numbers are produced by the notebook ("Reference data for the frontend") from SuperKart.csv and the
-# test-set results, and shipped next to this file - nothing is typed in by hand.
-REFERENCE_FILE = os.getenv("REFERENCE_FILE", "reference_data.json")
-with open(REFERENCE_FILE) as reference_file:
-    REFERENCE = json.load(reference_file)
-# Per outlet: profile, revenue per product (avg, p10, p90), ranges sold, and the final model's test-set error
-# (mape = average % error, err90 = 90th-percentile % error, test_rows = test products)
-STORES = REFERENCE["stores"]
-REFERENCE_YEAR = 2025          # store age is computed as 2025 - establishment year, as in the model
+# test-set results, and shipped next to this file as reference_data.json - nothing is typed in by hand.
+import assistant_core as core
+from assistant_core import (MODEL_COLUMNS, OUTLET_DIST, PERISHABLES, PRODUCT_TYPES, REFERENCE, STORES, TRAINED_RANGES,
+                            TYPE_RANGES, model_row, outlet_position, planning_facts, stock_range, sugar_options, tier_of)
 
-PRODUCT_TYPES = [
-    "Baking Goods", "Breads", "Breakfast", "Canned", "Dairy", "Frozen Foods", "Fruits and Vegetables",
-    "Hard Drinks", "Health and Hygiene", "Household", "Meat", "Others", "Seafood", "Snack Foods",
-    "Soft Drinks", "Starchy Foods",
-]
-PERISHABLES = {"Dairy", "Meat", "Fruits and Vegetables", "Breakfast", "Breads", "Seafood"}
-DRINKS = {"Hard Drinks", "Soft Drinks"}
-NON_CONSUMABLES = {"Health and Hygiene", "Household", "Others"}
-
-# Range of weight and MRP actually sold for each product type - the form will not accept values outside these limits,
-# because the model has no data there (a tree model would silently treat them as the edge value)
-TYPE_RANGES = REFERENCE["type_ranges"]
-TRAINED_RANGES = REFERENCE["trained_ranges"]
+TIER_COLOUR = {"Top 20%": "#0F7B5C", "Middle 60%": "#64748B", "Bottom 20%": "#B86E12"}
+# Planning assistant switch (Space variables / secrets):
+#   ASSISTANT_MODE = "off"     - no assistant at all (default)
+#                    "preview" - only for a link with ?preview=<ASSISTANT_PREVIEW_CODE>, to test it on the live app
+#                    "on"      - for everyone
+#   ANTHROPIC_API_KEY (secret) - required for "preview" and "on"
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+ASSISTANT_MODE = os.getenv("ASSISTANT_MODE", "off").strip().lower()
+ASSISTANT_PREVIEW_CODE = os.getenv("ASSISTANT_PREVIEW_CODE")
 
 
-# Each outlet's actual revenue per product: percentiles 0-100 in steps of 5, top/bottom-fifth thresholds and a
-# 25-bin histogram [from, to, products]
-OUTLET_DIST = REFERENCE["outlet_dist"]
-
-
-def outlet_position(store_id, value):
-    """Share (%) of the outlet's products whose actual revenue is below this value (historical data)."""
-    pct = OUTLET_DIST[store_id]["pct"]
-    if value <= pct[0]:
-        return 0.0
-    if value >= pct[-1]:
-        return 100.0
-    for i in range(1, len(pct)):
-        if value <= pct[i]:
-            low, high = pct[i - 1], pct[i]
-            fraction = 0 if high == low else (value - low) / (high - low)
-            return 5 * (i - 1 + fraction)
-    return 100.0
-
-
-def tier_of(store_id, value):
-    """Top 20% / Middle 60% / Bottom 20% of the outlet's products, with a badge colour."""
-    d = OUTLET_DIST[store_id]
-    if value >= d["p80"]:
-        return "Top 20%", "#0F7B5C"
-    if value < d["p20"]:
-        return "Bottom 20%", "#B86E12"
-    return "Middle 60%", "#64748B"
-
-
-def stock_range(store_id, forecast, mrp):
-    """Units at MRP, and the range forecast +/- the outlet's 90th-percentile error."""
-    error = STORES[store_id]["err90"]
-    units = forecast / mrp
-    return units, units * (1 - error), units * (1 + error)
-
-def product_family(product_type):
-    """Product family code used by the model (first two letters of Product_Id)."""
-    if product_type in DRINKS:
-        return "DR"
-    if product_type in NON_CONSUMABLES:
-        return "NC"
-    return "FD"
-
-
-def sugar_options(product_type):
-    """Sugar labels that occur for this product type in the data (non-consumables are always 'No Sugar')."""
-    return ["No Sugar"] if product_type in NON_CONSUMABLES else ["Low Sugar", "Regular"]
-
-
-def model_row(store_id, product_type, sugar, weight, mrp, area_share):
-    """Translate the user's choices into the ten model inputs."""
-    store = STORES[store_id]
-    return {
-        "Product_Weight": float(weight),
-        "Product_Sugar_Content": sugar,
-        "Product_Allocated_Area": float(area_share),
-        "Product_MRP": float(mrp),
-        "Store_Size": store["Store_Size"],
-        "Store_Location_City_Type": store["Store_Location_City_Type"],
-        "Store_Type": store["Store_Type"],
-        "Product_Id_char": product_family(product_type),
-        "Store_Age_Years": REFERENCE_YEAR - store["Established"],
-        "Product_Type_Category": "Perishables" if product_type in PERISHABLES else "Non Perishables",
-    }
+def assistant_switched_on():
+    if not ANTHROPIC_API_KEY:
+        return False
+    if ASSISTANT_MODE == "on":
+        return True
+    if ASSISTANT_MODE == "preview" and ASSISTANT_PREVIEW_CODE:
+        return st.query_params.get("preview") == ASSISTANT_PREVIEW_CODE
+    return False
 
 
 def match_outlet(row):
@@ -126,7 +55,85 @@ def match_outlet(row):
                 store["Store_Type"], store["Store_Size"], store["Store_Location_City_Type"]):
             return store_id
     return None
-# HELPERS-END
+
+
+@st.cache_resource
+def claude_client():
+    import anthropic
+    return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+
+def md_safe(text):
+    """Show $ as a dollar sign: Streamlit markdown would otherwise read $...$ as a maths formula."""
+    return text.replace("\\$", "$").replace("$", "\\$")
+
+
+def trace_badge(untraced, where=st):
+    """Guardrail made visible: every number in an LLM text must match the model / data it was given."""
+    if untraced:
+        where.warning("Could not trace these figures to the model or SuperKart's data - treat them with caution: "
+                      + ", ".join(untraced))
+    else:
+        where.caption("✓ Every figure in this text comes from the model or SuperKart's data.")
+
+
+def read_aloud(text, key):
+    """One button: Read aloud, which turns into Stop while speaking. Browser speech synthesis - free, runs in the
+    user's browser, nothing is sent anywhere."""
+    components.html(f"""
+        <button id="speak{key}" style="background:#0F7B5C;color:white;border:none;border-radius:8px;padding:5px 14px;
+                font-family:sans-serif;font-weight:600;cursor:pointer;min-width:120px;">🔊 Read aloud</button>
+        <script>
+          const text = {json.dumps(text)};
+          const button = document.getElementById("speak{key}");
+          const idle = () => {{ button.textContent = "🔊 Read aloud"; button.style.background = "#0F7B5C"; }};
+          button.onclick = () => {{
+              const synth = window.speechSynthesis;
+              if (synth.speaking) {{ synth.cancel(); idle(); return; }}
+              const u = new SpeechSynthesisUtterance(text.replace(/[*_#`]/g, ""));
+              u.lang = "en-US";
+              u.onend = idle; u.onerror = idle;
+              synth.cancel(); synth.speak(u);
+              button.textContent = "■ Stop"; button.style.background = "#B86E12";
+          }};
+        </script>""", height=44)
+
+
+def assistant_error(error, where=st):
+    """Short message for users; in preview mode also the API's own message. Full details go to the Space logs."""
+    import sys, traceback
+    traceback.print_exc(file=sys.stderr)
+    detail = f" - {str(error)[:300]}" if ASSISTANT_MODE == "preview" else ""
+    where.error(f"The assistant is not available right now ({type(error).__name__}){detail}. Please try again.")
+
+
+def data_chart(call):
+    """Bar chart drawn by code from a data-tool result (never by the LLM), so it always matches the numbers."""
+    result, rows = call["result"], call["result"].get("rows") if isinstance(call["result"], dict) else None
+    if not rows or len(rows) < 2:
+        return None
+    frame = pd.DataFrame(rows)
+    if call["tool"] == "data_relationship":
+        group = result.get("group_by")
+        if not group or "correlation" not in frame:
+            return None
+        return alt.Chart(frame).mark_bar(color=BRAND).encode(
+            x=alt.X("correlation:Q", title=f"Correlation of {result['x']} with {result['y']}", scale=alt.Scale(domain=[-1, 1])),
+            y=alt.Y(f"{group}:N", title=None), tooltip=list(frame.columns)).properties(height=28 * len(frame))
+    groups = result.get("group_by") or []
+    value = next((s for s in ("sum", "mean", "median", "max", "min") if s in frame), "products")
+    if not groups:
+        return None
+    title = f"{value} of {result.get('measure', '')}".replace("sum of", "Total").replace("mean of", "Average") if value != "products" else "Products"
+    if value != "products" and result.get("measure") in ("revenue", "mrp"):
+        title += " ($)"
+    encoding = dict(x=alt.X(f"{value}:Q", title=title.strip()), y=alt.Y(f"{groups[0]}:N", sort="-x", title=None),
+                    tooltip=list(frame.columns))
+    if len(groups) == 2:
+        encoding["color"] = alt.Color(f"{groups[1]}:N", legend=alt.Legend(orient="bottom", title=None))
+        encoding["yOffset"] = f"{groups[1]}:N"
+    chart = alt.Chart(frame).mark_bar(color=BRAND).encode(**encoding)
+    return chart.properties(height=min(26 * len(frame), 520))
 
 
 def predict_batch(frame):
@@ -141,7 +148,8 @@ def predict_batch(frame):
 # ----------------------------------------------------------------------------------------------
 # Page
 # ----------------------------------------------------------------------------------------------
-st.set_page_config(page_title="SuperKart Sales Forecasting", page_icon="🛒", layout="wide")
+st.set_page_config(page_title="SuperKart Planning Hub", page_icon="🛒", layout="wide")
+ASSISTANT_ON = assistant_switched_on()
 
 # Visual styling (colours match .streamlit/config.toml)
 BRAND, BRAND_DARK, BRAND_LIGHT, ACCENT = "#0F7B5C", "#0B5A44", "#E8F3EF", "#F2A541"
@@ -166,9 +174,9 @@ st.markdown(f"""
     .stTabs [data-baseweb="tab"] {{ font-weight: 600; }}
 </style>
 <div class="sk-header">
-    <h1>🛒 SuperKart Sales Forecasting</h1>
+    <h1>🛒 SuperKart Planning Hub</h1>
     <p>How much revenue will a product earn at a SuperKart outlet - and how much should we stock?
-       For procurement, inventory and range planning.</p>
+       For procurement, inventory and range planning.{" Ask about the sales data in plain English." if ASSISTANT_ON else ""}</p>
     <p style="margin-top:0.6rem;"><span class="sk-badge">XGBoost model</span>
        <span class="sk-badge">~4% average error on unseen products</span>
        <span class="sk-badge">4 outlets</span></p>
@@ -176,20 +184,90 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 with st.expander("How to use this tool"):
     st.markdown(
-        "- **Single product:** choose the outlet and describe the product as it is (its actual price, weight and "
+        "- **Forecast:** choose the outlet and describe the product as it is (its actual price, weight and "
         "display share). You get the forecast revenue, how it ranks among the outlet's products, and a suggested "
         "stock range.\n"
-        "- **Plan a product list:** upload a CSV of products to forecast them all at once, with each product's tier "
-        "at its outlet, a stock range and the total forecast revenue per outlet.\n\n"
+        "- **Stock planning (upload):** upload a CSV of the products you plan to stock to forecast them all at once, with each product's tier "
+        "at its outlet, a stock range and the total forecast revenue per outlet.\n"
+        + ("- **Ask SuperKart (first tab):** ask in plain English about the historical sales data or a product to forecast. The assistant calls the same model and "
+           "explains the result; every figure it gives is checked against the model's output.\n" if ASSISTANT_ON else "")
+        + "\n"
+        "*Money* (MRP and revenue) is shown in US dollars (\\$).\n\n"
         "*What a forecast means:* the revenue a product is expected to earn at the outlet **over the same period as the "
         "historical sales data**, based on patterns in past sales. The data has no dates, so it is not a dated weekly or "
         "quarterly figure, and it is **not a pricing tool** - it describes products as they are, not what would happen "
         "if a price changed."
     )
 
-single_tab, batch_tab = st.tabs(["Single product", "Plan a product list (CSV)"])
+# Tabs: the planning assistant gets its own full-width tab when it is switched on (room for answers and charts)
+if ASSISTANT_ON:
+    chat_tab, single_tab, batch_tab = st.tabs(["💬 Ask SuperKart", "Forecast", "Stock planning (upload)"])
+else:
+    chat_tab = None
+    single_tab, batch_tab = st.tabs(["Forecast", "Stock planning (upload)"])
 
-# ---------------------------------------- Single product ---------------------------------------
+# ---------------------------------------- Planning assistant (chat tab) -------------------------
+# The assistant (Claude via the Anthropic API) turns a plain-English question into the model's inputs, calls the same
+# forecasting API and the backend's data endpoints as tools, and explains the result. Every number must come from a tool;
+# the app checks this and flags anything it cannot trace. Charts are drawn by code from the tool results.
+EXAMPLES = ["What are the sales of Frozen Foods in all outlets?",
+            "Describe OUT002.",
+            "Is MRP linked to revenue at each outlet?",
+            "How many units of a snack food at MRP $150, weight 11 should OUT002 stock?"]
+if ASSISTANT_ON:
+    with chat_tab:
+        st.caption("Ask about SuperKart's historical sales data, or forecast a product and how much to stock. "
+                   "Out of scope: dated forecasts, price what-ifs, profit, cause and effect, other stores.")
+        if ASSISTANT_MODE == "preview":
+            st.warning("Preview - only visible through the preview link.")
+        st.session_state.setdefault("chat_history", [])     # messages sent to the LLM
+        st.session_state.setdefault("chat_display", [])     # (role, text, tool calls, untraced figures)
+        for i, (role, text, calls, untraced) in enumerate(st.session_state["chat_display"]):
+            with st.chat_message(role):
+                st.markdown(md_safe(text))
+                if role == "assistant":
+                    for c in [c for c in calls if c["tool"] in core.CHART_TOOLS][:2]:
+                        chart = data_chart(c)
+                        if chart is not None:
+                            st.altair_chart(chart, use_container_width=True)
+                    trace_badge(untraced)
+                    read_aloud(text, f"chat{i}")
+                    if calls:
+                        with st.expander(f"How this was answered ({len(calls)} step{'s' if len(calls) > 1 else ''})"):
+                            for c in calls:
+                                st.markdown(f"**{c['tool']}** `{json.dumps(c['input'])}`")
+                                st.json(c["result"], expanded=False)
+        clicked = None
+        if not st.session_state["chat_display"]:
+            st.markdown("**Try one of these:**")
+            for column, example in zip(st.columns(len(EXAMPLES)), EXAMPLES):
+                if column.button(example, use_container_width=True):
+                    clicked = example
+        with st.form("ask", clear_on_submit=True):
+            question = st.text_area("Your question", height=110, label_visibility="collapsed",
+                                    placeholder="Ask about sales, outlets, categories or prices - or a product to forecast")
+            ask_col, clear_col = st.columns([4, 1])
+            asked = ask_col.form_submit_button("Ask", type="primary", use_container_width=True)
+            cleared = clear_col.form_submit_button("Clear chat", use_container_width=True)
+        if cleared:
+            st.session_state["chat_history"], st.session_state["chat_display"] = [], []
+            st.rerun()
+        question = clicked or (question.strip() if asked and question else "")
+        if question:
+            try:
+                with st.spinner("Checking the data and the model..."):
+                    history = list(core.trim_history(st.session_state["chat_history"]))
+                    result = core.run_agent(claude_client(), history, question)
+            except Exception as error:          # API or network errors must not break the app
+                st.session_state["chat_history"] = []          # start the conversation memory afresh after an error
+                assistant_error(error)
+            else:
+                st.session_state["chat_history"] = history
+                st.session_state["chat_display"] += [("user", question, [], []),
+                                                     ("assistant", result["answer"], result["calls"], result["untraced"])]
+                st.rerun()
+
+# ---------------------------------------- Forecast (one product) -------------------------------
 with single_tab:
     left, right = st.columns([1, 1])
     with left:
@@ -212,11 +290,11 @@ with single_tab:
         clamp = lambda v, rng: min(max(v, rng[0]), rng[1])
         sugar = st.selectbox("Sugar content", sugar_options(product_type),
                              help="Household, health & hygiene and other non-food items are always 'No Sugar'.")
-        mrp = st.number_input(f"Maximum retail price (MRP) - {limits['mrp'][0]:g} to {limits['mrp'][1]:g} for {product_type}",
+        mrp = st.number_input(f"Maximum retail price (MRP, \\$) - \\${limits['mrp'][0]:g} to \\${limits['mrp'][1]:g} for {product_type}",
                               min_value=float(limits["mrp"][0]), max_value=float(limits["mrp"][1]),
                               value=float(clamp(117.08, limits["mrp"])), step=1.0,
                               help=f"Enter the product's actual MRP. Limited to the range sold for {product_type}; "
-                                   f"prices sold at {store_id} range from {store['mrp'][0]:.0f} to {store['mrp'][1]:.0f}.")
+                                   f"prices sold at {store_id} range from \\${store['mrp'][0]:.0f} to \\${store['mrp'][1]:.0f}.")
         weight = st.number_input(f"Product weight (unit as in the source data) - {limits['weight'][0]:g} to {limits['weight'][1]:g}",
                                  min_value=float(limits["weight"][0]), max_value=float(limits["weight"][1]),
                                  value=float(clamp(12.66, limits["weight"])), step=0.1,
@@ -251,17 +329,18 @@ with single_tab:
         if current and current[0] == row:
             forecast = current[1]
             label = f" ({product_name.strip()})" if product_name.strip() else ""
-            st.metric(f"Forecast revenue for this product{label} at {store_id}", f"{forecast:,.2f}")
+            st.metric(f"Forecast revenue for this product{label} at {store_id}", f"${forecast:,.2f}")
             st.caption("Over the same period as the historical sales data.")
 
             # Where it ranks among the outlet's products
-            tier, colour = tier_of(store_id, forecast)
+            tier = tier_of(store_id, forecast)
+            colour = TIER_COLOUR[tier]
             position = outlet_position(store_id, forecast)
             vs_avg = forecast / store["avg"] - 1
             st.markdown(
                 f'<span class="sk-tier" style="background:{colour}">{tier} at {store_id}</span>&nbsp; '
                 f"Higher than about **{position:.0f}%** of {store_id}'s products; "
-                f"**{vs_avg:+.0%}** vs its average product ({store['avg']:,}).",
+                f"**{vs_avg:+.0%}** vs its average product (\\${store['avg']:,}).",
                 unsafe_allow_html=True)
 
             # Suggested stock range in units
@@ -270,7 +349,7 @@ with single_tab:
             st.info(
                 f"**Suggested stock: about {units:.0f} units** (range {low:.0f}-{high:.0f}).  \n"
                 f"Forecast ± {store_id}'s 90th-percentile error ({store['err90']:.1%}), converted to units at MRP "
-                f"{mrp:,.2f}. "
+                f"\\${mrp:,.2f}. "
                 + ("Perishable - stock near the middle of the range." if perishable
                    else "Long-life product - the upper end of the range is lower risk.")
             )
@@ -280,6 +359,28 @@ with single_tab:
             else:
                 st.caption(f"Expected accuracy at {store_id}: average error ±{store['mape']:.1%}; "
                            f"9 in 10 products within ±{store['err90']:.1%}.")
+
+            # Explain this result in plain English (Claude), and read it aloud
+            if ASSISTANT_ON:
+                explain_key = json.dumps(row, sort_keys=True)
+                if st.button("✨ Explain this result"):
+                    facts = {"outlet": store_id, "product_type": product_type, "mrp": mrp, "weight": weight,
+                             "display_share_pct": area_pct,
+                             "outlet_profile": {k: store[k] for k in ("Store_Type", "Store_Size", "Store_Location_City_Type",
+                                                                      "Established")},
+                             **planning_facts(store_id, product_type, mrp, forecast)}
+                    try:
+                        with st.spinner("Writing the explanation..."):
+                            st.session_state["explanation"] = (explain_key, core.explain(claude_client(), facts))
+                    except Exception as error:
+                        assistant_error(error)
+                explanation = st.session_state.get("explanation")
+                if explanation and explanation[0] == explain_key and explanation[1].get("empty"):
+                    st.info("The explanation could not be written this time - please click the button again.")
+                elif explanation and explanation[0] == explain_key:
+                    st.markdown(md_safe(explanation[1]["answer"]))
+                    trace_badge(explanation[1]["untraced"])
+                    read_aloud(explanation[1]["answer"], "single")
         else:
             st.caption("Set the outlet and product, then click **Forecast sales revenue**.")
 
@@ -295,25 +396,27 @@ with single_tab:
         zone_scale = alt.Scale(domain=["Bottom 20%", "Middle 60%", "Top 20%"], range=[ACCENT, "#B8C4CF", BRAND])
         bars["zero"] = 0
         histogram = alt.Chart(bars).mark_rect().encode(
-            x=alt.X("start:Q", title="Revenue per product at the outlet (actual, historical)"),
+            x=alt.X("start:Q", title="Revenue per product at the outlet ($, actual, historical)"),
             x2="end:Q",
             y=alt.Y("products:Q", title="Number of products"),
             y2="zero:Q",
             color=alt.Color("zone:N", scale=zone_scale, legend=alt.Legend(title=None, orient="top")),
-            tooltip=[alt.Tooltip("start:Q", title="From", format=",.0f"), alt.Tooltip("end:Q", title="To", format=",.0f"),
+            tooltip=[alt.Tooltip("start:Q", title="From ($)", format=",.0f"), alt.Tooltip("end:Q", title="To ($)", format=",.0f"),
                      alt.Tooltip("products:Q", title="Products")])
         marker = alt.Chart(pd.DataFrame({"x": [current[1]], "label": ["This product"]})).mark_rule(
-            color=BRAND_DARK, strokeDash=[6, 4], size=3).encode(x="x:Q", tooltip=[alt.Tooltip("x:Q", title="Forecast", format=",.0f")])
+            color=BRAND_DARK, strokeDash=[6, 4], size=3).encode(x="x:Q", tooltip=[alt.Tooltip("x:Q", title="Forecast ($)", format=",.0f")])
         st.altair_chart(histogram + marker, use_container_width=True)
         st.caption(f"Bars: actual revenue of {store_id}'s products in the historical data, coloured by its bottom fifth, "
                    "middle and top fifth. Dashed line: the forecast for this product. Top-fifth products are candidates "
                    "for deeper stock; bottom-fifth products for leaner stock or review.")
 
-# ---------------------------------------- Plan a product list ----------------------------------
+# ---------------------------------------- Stock planning (upload) ------------------------------
 with batch_tab:
-    st.subheader("Plan a product list")
-    st.write("Upload a CSV with one row per product and these columns (an optional `Store_Id` or "
-             "`Product_Id` column is kept in the results):")
+    st.subheader("Stock planning for a list of products")
+    st.write("Upload the products you plan to stock - a CSV with one row per product and outlet - to get each "
+             "product's forecast, its tier at the outlet and a stock range, plus the total forecast revenue per outlet "
+             "(the basis for each outlet's procurement budget). Columns needed (an optional `Store_Id` or `Product_Id` "
+             "column is kept in the results):")
     st.code(", ".join(MODEL_COLUMNS), language=None)
     template = pd.DataFrame([model_row(s, "Frozen Foods", "Low Sugar", 12.66, 117.08, 0.027) for s in STORES])
     template.insert(0, "Store_Id", list(STORES))
@@ -343,51 +446,78 @@ with batch_tab:
                         tiers.append("n/a"); units.append("–"); ranges.append("n/a")
                     elif o:
                         u, lo, hi = stock_range(o, f, m)
-                        tiers.append(tier_of(o, f)[0]); units.append(str(round(u))); ranges.append(f"{lo:.0f}-{hi:.0f}")
+                        tiers.append(tier_of(o, f)); units.append(str(round(u))); ranges.append(f"{lo:.0f}-{hi:.0f}")
                     else:
                         tiers.append("n/a"); units.append(str(round(f / m))); ranges.append("n/a")
                 batch["Tier_at_Outlet"] = tiers
                 batch["Units_Estimate"] = units
                 batch["Stock_Range_Units"] = ranges
-
-                st.success(f"Forecast {len(batch)} products - total forecast revenue {batch['Forecast_Revenue'].sum():,.2f} "
-                           "(over the same period as the historical data)")
                 first = [c for c in ["Outlet", "Product_Id", "Forecast_Revenue", "Tier_at_Outlet", "Units_Estimate",
                                      "Stock_Range_Units", "Data_Check"] if c in batch.columns]
                 batch = batch[first + [c for c in batch.columns if c not in first]]
-                st.dataframe(batch, use_container_width=True,
-                             column_config={"Forecast_Revenue": st.column_config.NumberColumn("Forecast revenue", format="%.2f"),
-                                            "Tier_at_Outlet": "Tier at outlet", "Units_Estimate": "≈ Units",
-                                            "Stock_Range_Units": "Stock range (units)", "Data_Check": "Check"})
-
                 summary = batch.groupby("Outlet").agg(
                     Products=("Forecast_Revenue", "size"),
                     Total_Forecast_Revenue=("Forecast_Revenue", "sum"),
                     Top_20=("Tier_at_Outlet", lambda t: int((t == "Top 20%").sum())),
                     Bottom_20=("Tier_at_Outlet", lambda t: int((t == "Bottom 20%").sum())),
                 ).round(2)
-                st.write("**Forecast revenue by outlet** - the basis for each outlet's procurement budget")
-                summary_chart = alt.Chart(summary.reset_index()).mark_bar(color=BRAND).encode(
-                    x=alt.X("Total_Forecast_Revenue:Q", title="Total forecast revenue"),
-                    y=alt.Y("Outlet:N", sort="-x", title=None),
-                    tooltip=["Outlet", "Products", alt.Tooltip("Total_Forecast_Revenue:Q", format=",.2f")])
-                st.altair_chart(summary_chart, use_container_width=True)
-                st.dataframe(summary, use_container_width=True,
-                             column_config={"Total_Forecast_Revenue": st.column_config.NumberColumn("Total forecast revenue", format="%.2f"),
-                                            "Top_20": "Top-20% products", "Bottom_20": "Bottom-20% products"})
-                if (batch["Data_Check"] != "OK").any():
-                    st.error("Some rows have a weight, MRP or display share outside the range the model was trained on "
-                             f"(weight {TRAINED_RANGES['Product_Weight'][0]:g}-{TRAINED_RANGES['Product_Weight'][1]:g}, "
-                             f"MRP {TRAINED_RANGES['Product_MRP'][0]:g}-{TRAINED_RANGES['Product_MRP'][1]:g}, display share "
-                             f"{100 * TRAINED_RANGES['Product_Allocated_Area'][0]:g}-{100 * TRAINED_RANGES['Product_Allocated_Area'][1]:g}%); "
-                             "their forecasts are not reliable.")
-                if (batch["Outlet"] == "not a SuperKart outlet").any():
-                    st.warning("Some rows describe a store profile that is not one of SuperKart's four outlets; "
-                               "their forecasts are extrapolations, so no tier or stock range is given.")
-
-                st.download_button("Download results (CSV)", batch.to_csv(index=False), "superkart_forecasts.csv", "text/csv")
+                st.session_state["batch_result"] = (uploaded_file.file_id, batch, summary)   # kept for the planning note
             except requests.exceptions.RequestException as error:
                 st.error(f"The forecasting service could not be reached: {error}. If it has been idle it may be waking up - please wait a minute and try again.")
+
+        saved = st.session_state.get("batch_result")
+        if saved and saved[0] == uploaded_file.file_id:
+            _, batch, summary = saved
+            st.success(f"Forecast {len(batch)} products - total forecast revenue \\${batch['Forecast_Revenue'].sum():,.2f} "
+                       "(over the same period as the historical data)")
+            st.dataframe(batch, use_container_width=True,
+                         column_config={"Forecast_Revenue": st.column_config.NumberColumn("Forecast revenue ($)", format="$%.2f"),
+                                        "Tier_at_Outlet": "Tier at outlet", "Units_Estimate": "≈ Units",
+                                        "Stock_Range_Units": "Stock range (units)", "Data_Check": "Check"})
+            st.write("**Forecast revenue by outlet** - the basis for each outlet's procurement budget")
+            summary_chart = alt.Chart(summary.reset_index()).mark_bar(color=BRAND).encode(
+                x=alt.X("Total_Forecast_Revenue:Q", title="Total forecast revenue ($)"),
+                y=alt.Y("Outlet:N", sort="-x", title=None),
+                tooltip=["Outlet", "Products", alt.Tooltip("Total_Forecast_Revenue:Q", title="Total forecast revenue ($)", format="$,.2f")])
+            st.altair_chart(summary_chart, use_container_width=True)
+            st.dataframe(summary, use_container_width=True,
+                         column_config={"Total_Forecast_Revenue": st.column_config.NumberColumn("Total forecast revenue ($)", format="$%.2f"),
+                                        "Top_20": "Top-20% products", "Bottom_20": "Bottom-20% products"})
+            if (batch["Data_Check"] != "OK").any():
+                st.error("Some rows have a weight, MRP or display share outside the range the model was trained on "
+                         f"(weight {TRAINED_RANGES['Product_Weight'][0]:g}-{TRAINED_RANGES['Product_Weight'][1]:g}, "
+                         f"MRP \\${TRAINED_RANGES['Product_MRP'][0]:g}-\\${TRAINED_RANGES['Product_MRP'][1]:g}, display share "
+                         f"{100 * TRAINED_RANGES['Product_Allocated_Area'][0]:g}-{100 * TRAINED_RANGES['Product_Allocated_Area'][1]:g}%); "
+                         "their forecasts are not reliable.")
+            if (batch["Outlet"] == "not a SuperKart outlet").any():
+                st.warning("Some rows describe a store profile that is not one of SuperKart's four outlets; "
+                           "their forecasts are extrapolations, so no tier or stock range is given.")
+            st.download_button("Download results (CSV)", batch.to_csv(index=False), "superkart_forecasts.csv", "text/csv")
+
+            # Planning note (Claude) from the per-outlet summary - numbers only from these results
+            if ASSISTANT_ON:
+                if st.button("✨ Write a planning note"):
+                    facts = {"total_forecast_revenue": round(float(batch["Forecast_Revenue"].sum()), 2),
+                             "products": len(batch),
+                             "by_outlet": summary.reset_index().to_dict(orient="records"),
+                             "rows_outside_trained_range": int((batch["Data_Check"] != "OK").sum()),
+                             "rows_not_a_superkart_outlet": int((batch["Outlet"] == "not a SuperKart outlet").sum()),
+                             "outlet_accuracy": {s: {"average_error_pct": round(100 * STORES[s]["mape"], 1),
+                                                     "error_9_in_10_within_pct": round(100 * STORES[s]["err90"], 1)}
+                                                 for s in summary.index if s in STORES}}
+                    try:
+                        with st.spinner("Writing the planning note..."):
+                            st.session_state["plan_note"] = (uploaded_file.file_id,
+                                                             core.explain(claude_client(), facts, kind="batch"))
+                    except Exception as error:
+                        assistant_error(error)
+                note = st.session_state.get("plan_note")
+                if note and note[0] == uploaded_file.file_id and note[1].get("empty"):
+                    st.info("The planning note could not be written this time - please click the button again.")
+                elif note and note[0] == uploaded_file.file_id:
+                    st.markdown(md_safe(note[1]["answer"]))
+                    trace_badge(note[1]["untraced"])
+                    read_aloud(note[1]["answer"], "batch")
 
 # ---------------------------------------- Reliability ------------------------------------------
 st.divider()
