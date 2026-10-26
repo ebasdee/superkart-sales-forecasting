@@ -115,7 +115,7 @@ def planning_facts(store_id, product_type, mrp, forecast):
 # ------------------------------------------------------------------------------------------------
 HISTORICAL = "in the historical sales data (the data has no dates)"
 DATA_DIMENSIONS = ["outlet", "product_type", "sugar_content", "perishable", "product_family", "store_type", "city_tier",
-                   "store_size"]
+                   "store_size", "revenue_tier"]
 DATA_MEASURES = ["revenue", "mrp", "weight", "display_share_pct"]
 
 
@@ -187,6 +187,18 @@ def tool_data_relationship(x, y, group_by=None, filters=None):
     return backend_post("/v1/data/relationship", {"x": x, "y": y, "group_by": group_by, "filters": filters or {}})
 
 
+def tool_correlation_matrix(filters=None):
+    return backend_post("/v1/data/correlation_matrix", {"filters": filters or {}})
+
+
+def tool_revenue_drivers(group_by=None, filters=None, factors=None):
+    return backend_post("/v1/data/drivers", {"group_by": group_by, "filters": filters or {}, "factors": factors})
+
+
+def tool_association_matrix(filters=None):
+    return backend_post("/v1/data/association_matrix", {"filters": filters or {}})
+
+
 def tool_forecast_product(outlet, product_type, mrp, weight, sugar_content=None, display_share_pct=None):
     """Validate in code, call the deployed model, add the planning facts."""
     outlet = str(outlet).strip().upper()
@@ -236,7 +248,9 @@ FILTERS_SCHEMA = {"type": "object", "description": "Optional filters, e.g. {\"ou
                   "\"Breads\"]}. Keys: " + ", ".join(DATA_DIMENSIONS) + ". Values as in the data: outlets OUT001-OUT004; "
                   "sugar_content Low Sugar / Regular / No Sugar; perishable Perishable / Non-perishable; product_family Food / "
                   "Drinks / Non-consumables; store_type Supermarket Type1 / Supermarket Type2 / Departmental Store / Food Mart; "
-                  "city_tier Tier 1 / Tier 2 / Tier 3; store_size High / Medium / Small.",
+                  "city_tier Tier 1 / Tier 2 / Tier 3; store_size High / Medium / Small; revenue_tier Top 20% / Middle 60% / "
+                  "Bottom 20% - the product's revenue tier within its own outlet (use it for 'high-revenue' or 'low-revenue' "
+                  "products).",
                   "properties": {d: {} for d in DATA_DIMENSIONS}}
 TOOLS = [
     {"name": "get_outlets",
@@ -270,6 +284,32 @@ TOOLS = [
          "x": {"type": "string", "enum": DATA_MEASURES}, "y": {"type": "string", "enum": DATA_MEASURES},
          "group_by": {"type": "string", "enum": DATA_DIMENSIONS}, "filters": FILTERS_SCHEMA},
          "required": ["x", "y"]}},
+    {"name": "correlation_matrix",
+     "description": "Multivariate view: the correlations between all numeric columns (revenue, MRP, weight, display share) at "
+                    "once, with optional filters (e.g. one outlet or category). Use it for a correlation matrix / heatmap or an "
+                    "overview of how the numeric columns relate to each other.",
+     "input_schema": {"type": "object", "properties": {"filters": FILTERS_SCHEMA}}},
+    {"name": "revenue_drivers",
+     "description": "Multivariate view: how much of the differences in revenue between products a set of factors explains "
+                    "together (explained_pct), what each factor explains alone and what it adds on top of the others, the "
+                    "standardised effect of each numeric factor, and MRP x weight on its own - overall or per group (e.g. per "
+                    "outlet), with optional filters. Default factors: MRP, weight and display share; add outlet, product_type, "
+                    "sugar_content, perishable or product_family to include them (use outlet for store effects - store type, "
+                    "city tier and size move one-for-one with it). Use it for 'what drives / explains revenue', multivariate "
+                    "or regression-style questions.",
+     "input_schema": {"type": "object", "properties": {
+         "group_by": {"type": "string", "enum": DATA_DIMENSIONS},
+         "factors": {"type": "array", "items": {"type": "string", "enum": ["mrp", "weight", "display_share_pct", "outlet",
+                                                                           "product_type", "sugar_content", "perishable",
+                                                                           "product_family"]}},
+         "filters": FILTERS_SCHEMA}}},
+    {"name": "association_matrix",
+     "description": "Multivariate view of ALL columns, numeric and categorical (revenue, MRP, weight, display share, outlet, "
+                    "category, sugar content, perishable, product family, store type, city tier, store size): the strength "
+                    "of association (0-1) for every pair - |correlation| for two numeric columns, the correlation ratio for "
+                    "a numeric and a categorical column, Cramer's V for two categorical ones. Optional filters. Use it for "
+                    "'which columns are associated with revenue', a full multivariate overview or an association heatmap.",
+     "input_schema": {"type": "object", "properties": {"filters": FILTERS_SCHEMA}}},
     {"name": "forecast_product",
      "description": "Forecast one product's revenue at one outlet with the deployed SuperKart model, plus its tier at the "
                     "outlet, position vs the outlet's products, a suggested stock range in units and the expected accuracy. "
@@ -287,8 +327,10 @@ TOOLS = [
 ]
 TOOL_FUNCTIONS = {"get_outlets": tool_get_outlets, "get_model_accuracy": tool_get_model_accuracy,
                   "get_category_ranges": tool_get_category_ranges, "summarise_data": tool_summarise_data,
-                  "data_relationship": tool_data_relationship, "forecast_product": tool_forecast_product}
-CHART_TOOLS = {"summarise_data", "data_relationship"}      # the app draws a chart from these results
+                  "data_relationship": tool_data_relationship, "correlation_matrix": tool_correlation_matrix,
+                  "revenue_drivers": tool_revenue_drivers, "association_matrix": tool_association_matrix,
+                  "forecast_product": tool_forecast_product}
+CHART_TOOLS = {"summarise_data", "data_relationship", "correlation_matrix", "revenue_drivers", "association_matrix"}   # the app draws charts from these
 
 SYSTEM_PROMPT = """You are the SuperKart planning assistant, for store, procurement and supply-chain users of SuperKart's four outlets.
 You answer questions about SuperKart's historical sales data, forecast a product's revenue at an outlet, and help decide how
@@ -301,9 +343,11 @@ Rules - follow them strictly:
    comparing comes from a tool result in this answer. When a ranking could mean two things (e.g. total revenue vs average per
    product), say which one you use, or give both.
 3. Questions about sales, products, categories, prices or outlets: answer from the data tools (summarise_data,
-   data_relationship, get_outlets, get_category_ranges). Say the figures are from the historical sales data - the data has no
+   data_relationship, correlation_matrix, revenue_drivers, get_outlets, get_category_ranges). For a "bivariate analysis" use
+   data_relationship (and summarise_data for categories); for a "multivariate analysis" use association_matrix (all
+   columns) and revenue_drivers (include outlet and product_type as factors when looking across outlets). Say the figures are from the historical sales data - the data has no
    dates, so there is no "current" or "this month" figure; give the historical figures instead. The app draws a chart from
-   summarise_data and data_relationship results, so do not draw tables of the same numbers.
+   every data-tool result, so do not draw tables of the same numbers.
 4. Describing an outlet: use get_outlets and, for its categories, summarise_data. Do NOT mention model accuracy or errors when
    describing outlets or historical data. Mention accuracy only with a forecast or when the user asks about accuracy
    (get_model_accuracy).
@@ -314,7 +358,12 @@ Rules - follow them strictly:
    omit them and mention the assumed values the tool reports. When you give a forecast, include the forecast revenue, the
    tier at the outlet, the suggested stock range in units and the expected accuracy; add the low-accuracy warning when the
    tool gives one.
-7. Relationships (data_relationship) are patterns in the historical data, not cause and effect - say so.
+7. Relationships and multivariate results (data_relationship, correlation_matrix, association_matrix, revenue_drivers)
+   are patterns in the historical data, not cause and effect - say so. Explain them plainly, e.g. "together these factors
+   explain about <explained_pct>% of the differences in revenue between products" and "MRP has the largest effect, display
+   share almost none" - always with the figures from the tool result. When a result includes a data_quality_note, pass it on
+   in one sentence. When it includes a store_note, say that store type, city tier and size cannot be separated from the
+   outlet.
 8. Decline briefly, and say why, when asked about:
    - forecasts for dates or periods (next month, next quarter, Diwali): the data has no dates;
    - price changes or what-if pricing: this is not a pricing tool - each product appears once in the data, so the model
@@ -327,7 +376,11 @@ Rules - follow them strictly:
    display share to show the effect of a change. Offer to forecast the product as it is, to show what the data says, or to
    describe the outlet.
 9. Money - revenue, forecasts and MRP - is in US dollars: write amounts like $2,910.75, $3,299 or $1.47 million.
-10. Be concise and plain-spoken. Short paragraphs or bullets; no tables unless asked. Never mention the names of the tools or of
+10. "Products" in the data are the different products an outlet carries (one row each), with their revenue. The data has
+    no units sold: say "carries 186 products", never "sold 186 products" or "sold the most"; if asked about units,
+    say the data has none and give revenue instead. For "high-revenue" / "best-selling" products use the revenue_tier
+    filter (Top 20% at the outlet) and say how it is defined.
+11. Be concise and plain-spoken. Short paragraphs or bullets; no tables unless asked. Never mention the names of the tools or of
    the AI model."""
 
 
@@ -348,6 +401,15 @@ def text_of(content):
     return "\n".join(block.text for block in content if getattr(block, "type", None) == "text").strip()
 
 
+def drop_thinking(history):
+    """Remove thinking blocks from finished turns. They are only needed while a turn's tool calls are in progress; kept in
+    the history they are bound to the exact earlier conversation, so trimming old turns would make the API reject them."""
+    for message in history:
+        if message["role"] == "assistant" and isinstance(message["content"], list):
+            kept = [b for b in message["content"] if getattr(b, "type", None) not in ("thinking", "redacted_thinking")]
+            message["content"] = kept or [{"type": "text", "text": "(no answer)"}]
+
+
 def run_agent(client, history, user_text, model=None, max_steps=8, max_tokens=2000):
     """One user turn: call the LLM, run the tools it asks for, repeat until it answers.
     history: list of API messages (updated in place). Returns the answer, the tool calls and their results.
@@ -361,6 +423,7 @@ def run_agent(client, history, user_text, model=None, max_steps=8, max_tokens=20
         tool_uses = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
         if response.stop_reason != "tool_use" or not tool_uses:
             answer = text_of(response.content) or "Sorry - I could not write an answer. Please rephrase the question."
+            drop_thinking(history)
             return {"answer": answer, "calls": calls,
                     "untraced": untraced_numbers(answer, [c["result"] for c in calls], user_text)}
         results = []
@@ -371,6 +434,7 @@ def run_agent(client, history, user_text, model=None, max_steps=8, max_tokens=20
         history.append({"role": "user", "content": results})
     answer = "Sorry - I could not complete this request. Please ask a narrower question or use the forecast form."
     history.append({"role": "assistant", "content": answer})            # close the turn cleanly
+    drop_thinking(history)
     return {"answer": answer, "calls": calls, "untraced": []}
 
 
