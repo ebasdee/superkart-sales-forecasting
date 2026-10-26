@@ -26,10 +26,9 @@ for app in backend frontend; do
   if docker container inspect "$app" >/dev/null 2>&1; then
     docker start "$app" >/dev/null && log "Started existing container $app"
   else
-    # Planning assistant (optional Codespaces secrets): ANTHROPIC_API_KEY, ASSISTANT_MODE (off/preview/on), ASSISTANT_PREVIEW_CODE
+    # Planning assistant: the Codespaces secret ANTHROPIC_API_KEY is passed into the containers
     docker run -d --name "$app" --network superkart-net --restart unless-stopped \
-      -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" -e ASSISTANT_MODE="${ASSISTANT_MODE:-off}" \
-      -e ASSISTANT_PREVIEW_CODE="${ASSISTANT_PREVIEW_CODE:-}" -p "$port:$port" "superkart-$app" >/dev/null && log "Created container $app"
+      -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" -p "$port:$port" "superkart-$app" >/dev/null && log "Created container $app"
   fi
 done
 
