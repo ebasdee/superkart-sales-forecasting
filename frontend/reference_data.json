@@ -895,5 +895,8 @@
   "test_rows": 2629,
   "store_average_mape": 0.187,
   "model_mape": 0.044
+ },
+ "defaults": {
+  "display_share_median": 0.056
  }
 }
