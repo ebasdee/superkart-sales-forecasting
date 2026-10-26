@@ -379,6 +379,14 @@ if ASSISTANT_ON:
                                 st.markdown(f"**{c['tool']}** `{json.dumps(c['input'])}`")
                                 st.json(c["result"], expanded=False)
         clicked = None
+        app_results = [q for q, key in (("Explain my forecast from the Forecast tab.", "context_forecast"),
+                                        ("Explain my stock plan from the Stock planning tab.", "context_stock_plan"))
+                       if st.session_state.get(key)]
+        if app_results:
+            st.markdown("**About your work in the other tabs:**")
+            for column, example in zip(st.columns(len(app_results)), app_results):
+                if column.button(example, use_container_width=True, key=f"ctx_{example}"):
+                    clicked = example
         if not st.session_state["chat_display"]:
             st.markdown("**Try one of these:**")
             for column, example in zip(st.columns(len(EXAMPLES)), EXAMPLES):
@@ -398,7 +406,9 @@ if ASSISTANT_ON:
             try:
                 with st.spinner("Checking the data and the model..."):
                     history = list(core.trim_history(st.session_state["chat_history"]))
-                    result = core.run_agent(claude_client(), history, question)
+                    result = core.run_agent(claude_client(), history, question,
+                                            context={"forecast": st.session_state.get("context_forecast"),
+                                                     "stock_plan": st.session_state.get("context_stock_plan")})
             except Exception as error:          # API or network errors must not break the app
                 st.session_state["chat_history"] = []          # start the conversation memory afresh after an error
                 assistant_error(error)
@@ -501,15 +511,18 @@ with single_tab:
                 st.caption(f"Expected accuracy at {store_id}: average error ±{store['mape']:.1%}; "
                            f"9 in 10 products within ±{store['err90']:.1%}.")
 
+            # The result as facts - for "Explain this result" and for the chat assistant ("explain my forecast")
+            facts = {"tab": "Forecast", "outlet": store_id, "product_type": product_type, "sugar_content": sugar,
+                     "mrp": mrp, "weight": weight, "display_share_pct": area_pct,
+                     "outlet_profile": {k: store[k] for k in ("Store_Type", "Store_Size", "Store_Location_City_Type",
+                                                              "Established")},
+                     **planning_facts(store_id, product_type, mrp, forecast)}
+            st.session_state["context_forecast"] = facts
+
             # Explain this result in plain English (Claude), and read it aloud
             if ASSISTANT_ON:
                 explain_key = json.dumps(row, sort_keys=True)
                 if st.button("✨ Explain this result"):
-                    facts = {"outlet": store_id, "product_type": product_type, "mrp": mrp, "weight": weight,
-                             "display_share_pct": area_pct,
-                             "outlet_profile": {k: store[k] for k in ("Store_Type", "Store_Size", "Store_Location_City_Type",
-                                                                      "Established")},
-                             **planning_facts(store_id, product_type, mrp, forecast)}
                     try:
                         with st.spinner("Writing the explanation..."):
                             st.session_state["explanation"] = (explain_key, core.explain(claude_client(), facts))
@@ -635,17 +648,27 @@ with batch_tab:
                            "their forecasts are extrapolations, so no tier or stock range is given.")
             st.download_button("Download results (CSV)", batch.to_csv(index=False), "superkart_forecasts.csv", "text/csv")
 
+            # The plan as facts - for the planning note and for the chat assistant ("explain my stock plan")
+            row_columns = [c for c in ["Outlet", "Product_Id", "Forecast_Revenue", "Tier_at_Outlet", "Units_Estimate",
+                                       "Stock_Range_Units", "Data_Check", "Product_MRP", "Product_Weight",
+                                       "Product_Type_Category", "Product_Id_char"] if c in batch.columns]
+            facts = {"tab": "Stock planning (upload)", "file": uploaded_file.name,
+                     "total_forecast_revenue": round(float(batch["Forecast_Revenue"].sum()), 2),
+                     "products": len(batch),
+                     "by_outlet": json.loads(summary.reset_index().to_json(orient="records")),   # plain JSON types
+                     "rows_outside_trained_range": int((batch["Data_Check"] != "OK").sum()),
+                     "rows_not_a_superkart_outlet": int((batch["Outlet"] == "not a SuperKart outlet").sum()),
+                     "outlet_accuracy": {s: {"average_error_pct": round(100 * STORES[s]["mape"], 1),
+                                             "error_9_in_10_within_pct": round(100 * STORES[s]["err90"], 1)}
+                                         for s in summary.index if s in STORES},
+                     "stock_range_rule": "forecast +/- the outlet's 9-in-10 error, divided by MRP (units)",
+                     "product_rows": json.loads(batch[row_columns].head(60).to_json(orient="records")),
+                     "rows_shown": min(60, len(batch))}
+            st.session_state["context_stock_plan"] = facts
+
             # Planning note (Claude) from the per-outlet summary - numbers only from these results
             if ASSISTANT_ON:
                 if st.button("✨ Write a planning note"):
-                    facts = {"total_forecast_revenue": round(float(batch["Forecast_Revenue"].sum()), 2),
-                             "products": len(batch),
-                             "by_outlet": summary.reset_index().to_dict(orient="records"),
-                             "rows_outside_trained_range": int((batch["Data_Check"] != "OK").sum()),
-                             "rows_not_a_superkart_outlet": int((batch["Outlet"] == "not a SuperKart outlet").sum()),
-                             "outlet_accuracy": {s: {"average_error_pct": round(100 * STORES[s]["mape"], 1),
-                                                     "error_9_in_10_within_pct": round(100 * STORES[s]["err90"], 1)}
-                                                 for s in summary.index if s in STORES}}
                     try:
                         with st.spinner("Writing the planning note..."):
                             st.session_state["plan_note"] = (uploaded_file.file_id,
