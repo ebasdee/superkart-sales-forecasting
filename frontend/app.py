@@ -28,24 +28,10 @@ from assistant_core import (MODEL_COLUMNS, OUTLET_DIST, PERISHABLES, PRODUCT_TYP
                             TYPE_RANGES, model_row, outlet_position, planning_facts, stock_range, sugar_options, tier_of)
 
 TIER_COLOUR = {"Top 20%": "#0F7B5C", "Middle 60%": "#64748B", "Bottom 20%": "#B86E12"}
-# Planning assistant switch (Space variables / secrets):
-#   ASSISTANT_MODE = "off"     - no assistant at all (default)
-#                    "preview" - only for a link with ?preview=<ASSISTANT_PREVIEW_CODE>, to test it on the live app
-#                    "on"      - for everyone
-#   ANTHROPIC_API_KEY (secret) - required for "preview" and "on"
+# The planning assistant is always part of the app; it needs the ANTHROPIC_API_KEY secret (Space secret / Codespaces
+# secret). Without it the assistant tab explains that it is not configured and the other tabs work as usual.
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-ASSISTANT_MODE = os.getenv("ASSISTANT_MODE", "off").strip().lower()
-ASSISTANT_PREVIEW_CODE = os.getenv("ASSISTANT_PREVIEW_CODE")
-
-
-def assistant_switched_on():
-    if not ANTHROPIC_API_KEY:
-        return False
-    if ASSISTANT_MODE == "on":
-        return True
-    if ASSISTANT_MODE == "preview" and ASSISTANT_PREVIEW_CODE:
-        return st.query_params.get("preview") == ASSISTANT_PREVIEW_CODE
-    return False
+ASSISTANT_ON = bool(ANTHROPIC_API_KEY)
 
 
 def match_outlet(row):
@@ -100,11 +86,10 @@ def read_aloud(text, key):
 
 
 def assistant_error(error, where=st):
-    """Short message for users; in preview mode also the API's own message. Full details go to the Space logs."""
+    """Short message for users; the full details go to the Space logs."""
     import sys, traceback
     traceback.print_exc(file=sys.stderr)
-    detail = f" - {str(error)[:300]}" if ASSISTANT_MODE == "preview" else ""
-    where.error(f"The assistant is not available right now ({type(error).__name__}){detail}. Please try again.")
+    where.error(f"The assistant is not available right now ({type(error).__name__}). Please try again.")
 
 
 LABELS = {"outlet": "Outlet", "product_type": "Category", "sugar_content": "Sugar content", "perishable": "Perishable",
@@ -292,10 +277,12 @@ def predict_batch(frame):
 # Page
 # ----------------------------------------------------------------------------------------------
 st.set_page_config(page_title="SuperKart Planning Hub", page_icon="🛒", layout="wide")
-ASSISTANT_ON = assistant_switched_on()
 
 # Visual styling (colours match .streamlit/config.toml)
 BRAND, BRAND_DARK, BRAND_LIGHT, ACCENT = "#0F7B5C", "#0B5A44", "#E8F3EF", "#F2A541"
+HEADER_LEAD = "AI-powered sales and stock planning for SuperKart's four outlets."
+HEADER_TEXT = ("Forecast what each product will earn, size every order with a stock range, and ask the sales data "
+               "anything in plain English - every figure traced to the model or SuperKart's data.")
 st.markdown(f"""
 <style>
     .block-container {{ padding-top: 1.5rem; max-width: 1200px; }}
@@ -307,6 +294,7 @@ st.markdown(f"""
                   padding: 1.2rem 1.6rem; border-radius: 12px; margin-bottom: 1rem; }}
     .sk-header h1 {{ color: white; margin: 0; font-size: 2rem; }}
     .sk-header p {{ color: #E6F2EE; margin: 0.3rem 0 0 0; font-size: 1rem; }}
+    .sk-header p.sk-lead {{ color: white; font-size: 1.15rem; font-weight: 600; }}
     .sk-badge {{ display: inline-block; background: {ACCENT}; color: #1F2A44; font-weight: 600;
                  padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.8rem; margin-right: 0.4rem; }}
     .sk-step {{ color: {BRAND_DARK}; font-weight: 700; font-size: 1.1rem; margin: 0.6rem 0 0.2rem 0; }}
@@ -318,9 +306,10 @@ st.markdown(f"""
 </style>
 <div class="sk-header">
     <h1>🛒 SuperKart Planning Hub</h1>
-    <p>How much revenue will a product earn at a SuperKart outlet - and how much should we stock?
-       For procurement, inventory and range planning.{" Ask about the sales data in plain English." if ASSISTANT_ON else ""}</p>
-    <p style="margin-top:0.6rem;"><span class="sk-badge">XGBoost model</span>
+    <p class="sk-lead">{HEADER_LEAD}</p>
+    <p>{HEADER_TEXT}</p>
+    <p style="margin-top:0.6rem;"><span class="sk-badge">XGBoost forecasts</span>
+       <span class="sk-badge">AI planning assistant</span>
        <span class="sk-badge">~4% average error on unseen products</span>
        <span class="sk-badge">4 outlets</span></p>
 </div>
@@ -333,7 +322,7 @@ with st.expander("How to use this tool"):
         "- **Stock planning (upload):** upload a CSV of the products you plan to stock to forecast them all at once, with each product's tier "
         "at its outlet, a stock range and the total forecast revenue per outlet.\n"
         + ("- **Ask SuperKart (first tab):** ask in plain English about the historical sales data or a product to forecast. The assistant calls the same model and "
-           "explains the result; every figure it gives is checked against the model's output.\n" if ASSISTANT_ON else "")
+           "explains the result; every figure it gives is checked against the model's output.\n")
         + "\n"
         "*Money* (MRP and revenue) is shown in US dollars (\\$).\n\n"
         "*What a forecast means:* the revenue a product is expected to earn at the outlet **over the same period as the "
@@ -343,11 +332,7 @@ with st.expander("How to use this tool"):
     )
 
 # Tabs: the planning assistant gets its own full-width tab when it is switched on (room for answers and charts)
-if ASSISTANT_ON:
-    chat_tab, single_tab, batch_tab = st.tabs(["💬 Ask SuperKart", "Forecast", "Stock planning (upload)"])
-else:
-    chat_tab = None
-    single_tab, batch_tab = st.tabs(["Forecast", "Stock planning (upload)"])
+chat_tab, single_tab, batch_tab = st.tabs(["💬 Ask SuperKart", "Forecast", "Stock planning (upload)"])
 
 # ---------------------------------------- Planning assistant (chat tab) -------------------------
 # The assistant (Claude via the Anthropic API) turns a plain-English question into the model's inputs, calls the same
@@ -357,12 +342,13 @@ EXAMPLES = ["What are the sales of Frozen Foods in all outlets?",
             "Describe OUT002.",
             "Is MRP linked to revenue at each outlet?",
             "How many units of a snack food at MRP $150, weight 11 should OUT002 stock?"]
-if ASSISTANT_ON:
-    with chat_tab:
+with chat_tab:
+    if not ASSISTANT_ON:
+        st.info("The planning assistant is not configured on this server (no ANTHROPIC_API_KEY secret). "
+                "The Forecast and Stock planning tabs work as usual.")
+    else:
         st.caption("Ask about SuperKart's historical sales data, or forecast a product and how much to stock. "
                    "Out of scope: dated forecasts, price what-ifs, profit, cause and effect, other stores.")
-        if ASSISTANT_MODE == "preview":
-            st.warning("Preview - only visible through the preview link.")
         st.session_state.setdefault("chat_history", [])     # messages sent to the LLM
         st.session_state.setdefault("chat_display", [])     # (role, text, tool calls, untraced figures)
         for i, (role, text, calls, untraced) in enumerate(st.session_state["chat_display"]):
