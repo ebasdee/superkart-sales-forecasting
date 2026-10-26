@@ -1,5 +1,5 @@
-# Use a minimal base image with Python 3.9 installed
-FROM python:3.9-slim
+# Use a minimal base image with Python 3.11 installed (the Anthropic SDK for the assistant needs a recent Python)
+FROM python:3.11-slim
 
 # Set the working directory inside the container to /app
 WORKDIR /app
