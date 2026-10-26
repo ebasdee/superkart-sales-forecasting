@@ -244,6 +244,91 @@ def tool_forecast_product(outlet, product_type, mrp, weight, sugar_content=None,
             **planning_facts(outlet, product_type, float(mrp), forecast)}
 
 
+def tool_get_app_guide(topic):
+    """How to use the app's Forecast and Stock planning tabs - built from the same reference data as the app, so the
+    allowed values and ranges are always the ones the app enforces."""
+    area = [round(100 * v, 1) for v in TRAINED_RANGES["Product_Allocated_Area"]]
+    outlets = {s: f"{v['Store_Type']}, {v['Store_Size']} size, {v['Store_Location_City_Type']} city, opened {v['Established']}"
+               for s, v in STORES.items()}
+    guides = {
+        "forecast_tab": {
+            "purpose": "Forecast one product (one SKU) at one SuperKart outlet: its revenue over the same period as the "
+                       "historical data, its tier at the outlet and a suggested stock range in units.",
+            "steps": ["1 - Outlet: pick one of the four outlets; its type, size, city tier and age are filled in automatically.",
+                      "2 - Describe the product: category (sets the product family and the perishable flag), sugar content "
+                      "(non-food categories are always 'No Sugar'), MRP, weight and share of the outlet's display area.",
+                      "3 - Click 'Forecast sales revenue'. The result shows the forecast, the tier at the outlet (top 20% / "
+                      "middle 60% / bottom 20%), the position among the outlet's products, a stock range and the accuracy; "
+                      "a chart shows where the product sits among the outlet's products.",
+                      "Optional: 'Explain this result' writes a plain-language explanation, with Read aloud."],
+            "outlets": outlets,
+            "categories": PRODUCT_TYPES,
+            "ranges": {"mrp_and_weight": "limited to the range sold for the chosen category (ask for a category's range)",
+                       "display_share_pct": area},
+            "warnings": ["If the MRP or weight is inside the category's range but outside what the chosen outlet sells, a "
+                         "warning says the forecast is less reliable.",
+                         "At OUT002 a warning recommends a safety margin and a manual review (lower accuracy there)."]},
+        "stock_planning_tab": {
+            "purpose": "Forecast a list of products at once - e.g. next period's planned assortment - with each product's tier "
+                       "and stock range, plus the total forecast revenue per outlet (the basis for each outlet's budget).",
+            "steps": ["1 - Prepare a CSV with one row per product and outlet (click 'Download a CSV template' for an example "
+                      "with the four outlets).",
+                      "2 - Upload it and click 'Forecast batch'.",
+                      "3 - Read the table (forecast, tier, units, stock range, check), the chart and totals per outlet, and "
+                      "download the results as CSV.",
+                      "Optional: 'Write a planning note' summarises the plan; the chat can explain it ('explain my stock plan')."],
+            "required_columns": {
+                "Product_Weight": f"number, {TRAINED_RANGES['Product_Weight'][0]:g} to {TRAINED_RANGES['Product_Weight'][1]:g} overall",
+                "Product_Sugar_Content": "Low Sugar / Regular / No Sugar (No Sugar for non-food items)",
+                "Product_Allocated_Area": f"share of display area as a fraction, {TRAINED_RANGES['Product_Allocated_Area'][0]:g} "
+                                          f"to {TRAINED_RANGES['Product_Allocated_Area'][1]:g} (e.g. 0.056 = 5.6%)",
+                "Product_MRP": f"number, {TRAINED_RANGES['Product_MRP'][0]:g} to {TRAINED_RANGES['Product_MRP'][1]:g} overall",
+                "Store_Size": "High / Medium / Small", "Store_Location_City_Type": "Tier 1 / Tier 2 / Tier 3",
+                "Store_Type": "Supermarket Type1 / Supermarket Type2 / Departmental Store / Food Mart",
+                "Product_Id_char": "FD (food) / DR (drinks) / NC (non-consumables)",
+                "Store_Age_Years": "2025 minus the outlet's opening year",
+                "Product_Type_Category": "Perishables / Non Perishables"},
+            "optional_columns": {"Store_Id": "OUT001-OUT004 - kept in the results and used to find the outlet",
+                                 "Product_Id": "your own product code - kept in the results"},
+            "store_profile_per_outlet": {s: {"Store_Size": v["Store_Size"], "Store_Location_City_Type": v["Store_Location_City_Type"],
+                                             "Store_Type": v["Store_Type"], "Store_Age_Years": REFERENCE_YEAR - v["Established"]}
+                                         for s, v in STORES.items()},
+            "tip": "Copy the store columns from the template row of the outlet - a combination that is not one of the four "
+                   "outlets is treated as a hypothetical store (no tier or stock range)."},
+        "reading_results": {
+            "tier": "Top 20% / Middle 60% / Bottom 20% of the outlet's products by historical revenue - deeper stock for "
+                    "top-tier products, leaner stock or review for bottom-tier ones.",
+            "position": "the share of the outlet's products whose historical revenue is below the forecast",
+            "stock_range": "forecast +/- the outlet's 9-in-10 error, divided by MRP, in units; perishables near the middle, "
+                           "long-life products toward the upper end",
+            "accuracy": {s: {"average_error_pct": round(100 * v["mape"], 1),
+                             "error_9_in_10_products_within_pct": round(100 * v["err90"], 1)} for s, v in STORES.items()},
+            "period": "a forecast is revenue over the same period as the historical data - the data has no dates"},
+        "errors": {
+            "These required columns are missing": "the CSV lacks one or more of the ten required columns - compare with the "
+                                                  "template; names must match exactly.",
+            "Outside range (Check column)": "the row's weight, MRP or display share is outside the range the model was "
+                                            "trained on - its forecast is not reliable, no tier or stock range is given.",
+            "not a SuperKart outlet": "the store columns do not match any of the four outlets - an extrapolation, no tier "
+                                      "or stock range.",
+            "The forecasting service could not be reached": "the backend may be waking up after being idle - wait about a "
+                                                            "minute and try again.",
+            "Forecast tab warning about the outlet's range": "the MRP or weight is inside the category's range but outside "
+                                                             "what this outlet sells - less reliable."},
+    }
+    if topic not in guides:
+        return {"error": f"Unknown topic '{topic}'.", "topics": list(guides)}
+    return {"topic": topic, **guides[topic]}
+
+
+APP_RESULTS = {
+    "get_current_forecast": ("forecast", "No forecast has been made in the Forecast tab in this session yet. Ask the user to "
+                                         "make one there (outlet, category, MRP, weight), or forecast the product here."),
+    "get_current_stock_plan": ("stock_plan", "No product list has been forecast in the Stock planning (upload) tab in this "
+                                             "session yet. Ask the user to upload a CSV there and click Forecast batch."),
+}
+
+
 FILTERS_SCHEMA = {"type": "object", "description": "Optional filters, e.g. {\"outlet\": \"OUT002\", \"product_type\": [\"Dairy\", "
                   "\"Breads\"]}. Keys: " + ", ".join(DATA_DIMENSIONS) + ". Values as in the data: outlets OUT001-OUT004; "
                   "sugar_content Low Sugar / Regular / No Sugar; perishable Perishable / Non-perishable; product_family Food / "
@@ -310,6 +395,22 @@ TOOLS = [
                     "a numeric and a categorical column, Cramer's V for two categorical ones. Optional filters. Use it for "
                     "'which columns are associated with revenue', a full multivariate overview or an association heatmap.",
      "input_schema": {"type": "object", "properties": {"filters": FILTERS_SCHEMA}}},
+    {"name": "get_app_guide",
+     "description": "How to use the app: the Forecast tab (fields, allowed values, steps), the Stock planning (upload) tab "
+                    "(steps, required CSV columns and their values, the store profile of each outlet), how to read the "
+                    "results (tier, position, stock range, accuracy) and what the app's error and warning messages mean.",
+     "input_schema": {"type": "object", "properties": {"topic": {"type": "string", "enum": [
+         "forecast_tab", "stock_planning_tab", "reading_results", "errors"]}}, "required": ["topic"]}},
+    {"name": "get_current_forecast",
+     "description": "The forecast the user made in the app's Forecast tab in this session: the inputs (outlet, category, MRP, "
+                    "weight, sugar content, display share) and the results shown there (forecast revenue, tier, position, stock "
+                    "range, accuracy). Use it when the user asks about 'my forecast', 'this result' or the Forecast tab.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_current_stock_plan",
+     "description": "The product list the user forecast in the app's Stock planning (upload) tab in this session: totals per "
+                    "outlet, top / bottom tier counts, flagged rows and the product rows (forecast, tier, units, stock range). "
+                    "Use it when the user asks about 'my plan', 'the list I uploaded' or the Stock planning tab.",
+     "input_schema": {"type": "object", "properties": {}}},
     {"name": "forecast_product",
      "description": "Forecast one product's revenue at one outlet with the deployed SuperKart model, plus its tier at the "
                     "outlet, position vs the outlet's products, a suggested stock range in units and the expected accuracy. "
@@ -329,6 +430,7 @@ TOOL_FUNCTIONS = {"get_outlets": tool_get_outlets, "get_model_accuracy": tool_ge
                   "get_category_ranges": tool_get_category_ranges, "summarise_data": tool_summarise_data,
                   "data_relationship": tool_data_relationship, "correlation_matrix": tool_correlation_matrix,
                   "revenue_drivers": tool_revenue_drivers, "association_matrix": tool_association_matrix,
+                  "get_app_guide": tool_get_app_guide,
                   "forecast_product": tool_forecast_product}
 CHART_TOOLS = {"summarise_data", "data_relationship", "correlation_matrix", "revenue_drivers", "association_matrix"}   # the app draws charts from these
 
@@ -380,14 +482,27 @@ Rules - follow them strictly:
     no units sold: say "carries 186 products", never "sold 186 products" or "sold the most"; if asked about units,
     say the data has none and give revenue instead. For "high-revenue" / "best-selling" products use the revenue_tier
     filter (Top 20% at the outlet) and say how it is defined.
-11. Be concise and plain-spoken. Short paragraphs or bullets; no tables unless asked. Never mention the names of the tools or of
+11. The user may ask you to explain what they did in the app's other tabs ("explain my forecast", "what does my stock plan
+    mean?", "why is this product in the bottom tier?"). Use get_current_forecast or get_current_stock_plan and explain those
+    results in plain language: what the forecast means, the tier, the stock range and how it is built (forecast +/- the
+    outlet's 9-in-10 error, divided by MRP), the accuracy, assumed inputs, flagged rows and what to do with them. If nothing
+    has been done there yet, say so and point to the tab.
+12. Questions on how to use the app ("how do I forecast?", "what columns does my CSV need?", "what does 'Outside range'
+    mean?"): use get_app_guide and give short, numbered steps with the exact field names, buttons and allowed values from it.
+    If the user wants a forecast you can also run it here (forecast_product).
+13. Describe accuracy correctly: "average error about X%" and "9 in 10 products within Y%" - never "typically within Y%".
+14. Be concise and plain-spoken. Short paragraphs or bullets; no tables unless asked. Never mention the names of the tools or of
    the AI model."""
 
 
 # ------------------------------------------------------------------------------------------------
 # Agent loop
 # ------------------------------------------------------------------------------------------------
-def run_tool(name, arguments):
+def run_tool(name, arguments, context=None):
+    if name in APP_RESULTS:                       # results the user produced in the app's other tabs
+        key, missing = APP_RESULTS[name]
+        value = (context or {}).get(key)
+        return value if value else {"error": missing}
     function = TOOL_FUNCTIONS.get(name)
     if function is None:
         return {"error": f"Unknown tool {name}"}
@@ -410,10 +525,11 @@ def drop_thinking(history):
             message["content"] = kept or [{"type": "text", "text": "(no answer)"}]
 
 
-def run_agent(client, history, user_text, model=None, max_steps=8, max_tokens=2000):
+def run_agent(client, history, user_text, model=None, max_steps=8, max_tokens=2000, context=None):
     """One user turn: call the LLM, run the tools it asks for, repeat until it answers.
     history: list of API messages (updated in place). Returns the answer, the tool calls and their results.
-    The turn always ends with an assistant message, so the next question can be added safely."""
+    The turn always ends with an assistant message, so the next question can be added safely.
+    context: results from the app's Forecast and Stock planning tabs ({"forecast": ..., "stock_plan": ...})."""
     history.append({"role": "user", "content": user_text})
     calls = []
     for _ in range(max_steps):
@@ -428,7 +544,7 @@ def run_agent(client, history, user_text, model=None, max_steps=8, max_tokens=20
                     "untraced": untraced_numbers(answer, [c["result"] for c in calls], user_text)}
         results = []
         for block in tool_uses:
-            result = run_tool(block.name, dict(block.input))
+            result = run_tool(block.name, dict(block.input), context)
             calls.append({"tool": block.name, "input": dict(block.input), "result": result})
             results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
         history.append({"role": "user", "content": results})
@@ -450,7 +566,9 @@ def trim_history(history, keep_turns=6):
 EXPLAIN_PROMPT = """You explain SuperKart forecasting results to store and procurement managers in plain English.
 Money (revenue, forecast, MRP) is in US dollars - write amounts like $2,910.75.
 Use only the facts given in the JSON. Do not add any number that is not in it (rounding is fine) and do not calculate new
-figures. No pricing advice, no dates, no profit. Write 3-5 short sentences, no headings, no bullet points, suitable to be read aloud."""
+figures. No pricing advice, no dates, no profit. Say a product "earns more than X% of the outlet's products", never "sells
+better" (the data has revenue, not units sold). Describe accuracy as "average error about X%" and "9 in 10 products within Y%".
+Write 3-5 short sentences, no headings, no bullet points, suitable to be read aloud."""
 
 PLAN_PROMPT = """You write a short planning note for SuperKart's procurement team from a batch forecast summary.
 Money (revenue, forecast, MRP) is in US dollars - write amounts like $16,500.00.
