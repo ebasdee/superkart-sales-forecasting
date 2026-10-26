@@ -107,33 +107,176 @@ def assistant_error(error, where=st):
     where.error(f"The assistant is not available right now ({type(error).__name__}){detail}. Please try again.")
 
 
+LABELS = {"outlet": "Outlet", "product_type": "Category", "sugar_content": "Sugar content", "perishable": "Perishable",
+          "product_family": "Product family", "store_type": "Store type", "city_tier": "City tier", "store_size": "Store size", "revenue_tier": "Revenue tier",
+          "revenue": "revenue", "mrp": "MRP", "weight": "weight", "display_share_pct": "display share"}
+
+
+def first_upper(text):
+    return text[:1].upper() + text[1:]
+
+
 def data_chart(call):
-    """Bar chart drawn by code from a data-tool result (never by the LLM), so it always matches the numbers."""
+    """Chart drawn by code from a data-tool result (never by the LLM), so it always matches the numbers.
+    One dimension: sorted bars. Two dimensions: a heatmap with the values written in the cells (readable even for
+    16 categories x 4 outlets); grouped bars only when the second dimension has few values."""
     result, rows = call["result"], call["result"].get("rows") if isinstance(call["result"], dict) else None
-    if not rows or len(rows) < 2:
+    if not rows or (len(rows) < 2 and call["tool"] != "revenue_drivers"):
         return None
     frame = pd.DataFrame(rows)
+    if call["tool"] == "correlation_matrix":
+        frame["x"] = frame["x"].map(lambda v: first_upper(LABELS.get(v, v)))
+        frame["y"] = frame["y"].map(lambda v: first_upper(LABELS.get(v, v)))
+        base = alt.Chart(frame).encode(x=alt.X("x:N", title=None, axis=alt.Axis(orient="top", labelAngle=0)),
+                                       y=alt.Y("y:N", title=None))
+        cells = base.mark_rect(stroke="white", strokeWidth=2).encode(
+            color=alt.Color("correlation:Q", scale=alt.Scale(scheme="redyellowgreen", domain=[-1, 1]),
+                            legend=alt.Legend(title="Correlation (-1 to 1)", orient="bottom")), tooltip=list(frame.columns))
+        text = base.mark_text(fontSize=13, color="#1F2A44").encode(text=alt.Text("correlation:Q", format=".2f"))
+        return (cells + text).properties(height=260)
+    if call["tool"] == "association_matrix":
+        order = [first_upper(LABELS.get(c, c)) for c in result.get("columns", [])]
+        frame["x"] = frame["x"].map(lambda v: first_upper(LABELS.get(v, v)))
+        frame["y"] = frame["y"].map(lambda v: first_upper(LABELS.get(v, v)))
+        base = alt.Chart(frame).encode(
+            x=alt.X("x:N", sort=order, title=None, axis=alt.Axis(orient="top", labelAngle=-40, labelLimit=160)),
+            y=alt.Y("y:N", sort=order, title=None, axis=alt.Axis(labelLimit=160)))
+        cells = base.mark_rect(stroke="white", strokeWidth=2).encode(
+            color=alt.Color("strength:Q", scale=alt.Scale(scheme="greens", domain=[0, 1]),
+                            legend=alt.Legend(title="Strength of association (0-1)", orient="bottom")),
+            tooltip=list(frame.columns))
+        text = base.mark_text(fontSize=11).encode(
+            text=alt.Text("strength:Q", format=".2f"),
+            color=alt.condition(alt.datum.strength > 0.6, alt.value("white"), alt.value("#1F2A44")))
+        return (cells + text).properties(height=max(260, 34 * len(order)))
+    if call["tool"] == "revenue_drivers":
+        frame = frame.dropna(subset=["explained_pct"]) if "explained_pct" in frame else frame.iloc[0:0]
+        if frame.empty:
+            return None
+        group = result.get("group_by")
+        if not group:
+            used = frame["factors_used"].iloc[0]
+            parts = pd.DataFrame([{"factor": first_upper(LABELS.get(f, f)), "share": frame[f"{kind}_pct_{f}"].iloc[0],
+                                   "how": label} for f in used
+                                  for kind, label in (("alone", "explains alone"), ("adds", "adds on top of the others"))])
+            return alt.Chart(parts).mark_bar().encode(
+                x=alt.X("share:Q", title=f"% of revenue differences explained - all together: "
+                                         f"{frame['explained_pct'].iloc[0]:.0f}%", scale=alt.Scale(domain=[0, 100])),
+                y=alt.Y("factor:N", sort=alt.EncodingSortField(field="share", op="max", order="descending"), title=None),
+                yOffset="how:N",
+                color=alt.Color("how:N", scale=alt.Scale(range=[BRAND, ACCENT]), legend=alt.Legend(title=None, orient="bottom")),
+                tooltip=list(parts.columns)).properties(height=max(140, 44 * len(used)))
+        frame = frame.drop(columns=[c for c in frame.columns if c == "factors_used" or c.startswith(("alone_pct_", "adds_pct_"))])
+        effects = frame.melt(id_vars=[c for c in frame.columns if not c.startswith("effect_")],
+                             value_vars=[c for c in frame.columns if c.startswith("effect_")], var_name="factor",
+                             value_name="effect")
+        effects["factor"] = effects["factor"].str.replace("effect_", "", regex=False).map(lambda v: first_upper(LABELS.get(v, v)))
+        base = alt.Chart(effects).encode(x=alt.X("factor:N", title=None, axis=alt.Axis(orient="top", labelAngle=0)),
+                                         y=alt.Y(f"{group}:N", title=None, axis=alt.Axis(labelLimit=260)))
+        cells = base.mark_rect(stroke="white", strokeWidth=2).encode(
+            color=alt.Color("effect:Q", scale=alt.Scale(scheme="redyellowgreen", domain=[-1, 1]),
+                            legend=alt.Legend(title="Relative effect (standardised)", orient="bottom")),
+            tooltip=list(effects.columns))
+        text = base.mark_text(fontSize=12, color="#1F2A44").encode(text=alt.Text("effect:Q", format=".2f"))
+        explained = alt.Chart(frame).mark_bar(color=BRAND).encode(
+            x=alt.X("explained_pct:Q", title="Explained by the factors together (%)", scale=alt.Scale(domain=[0, 100])),
+            y=alt.Y(f"{group}:N", title=None, axis=alt.Axis(labelLimit=260)), tooltip=list(frame.columns))
+        height = max(140, 28 * frame[group].nunique())
+        return alt.hconcat((cells + text).properties(height=height, width=380), explained.properties(height=height, width=320))
     if call["tool"] == "data_relationship":
         group = result.get("group_by")
         if not group or "correlation" not in frame:
             return None
-        return alt.Chart(frame).mark_bar(color=BRAND).encode(
-            x=alt.X("correlation:Q", title=f"Correlation of {result['x']} with {result['y']}", scale=alt.Scale(domain=[-1, 1])),
-            y=alt.Y(f"{group}:N", title=None), tooltip=list(frame.columns)).properties(height=28 * len(frame))
+        frame = frame.dropna(subset=["correlation"])
+        frame["direction"] = ["negative" if r < 0 else "positive" for r in frame["correlation"]]
+        frame["sample"] = ["fewer than 30 products" if n < 30 else "30 products or more" for n in frame["products"]]
+        low = min(-0.2, float(frame["correlation"].min()) - 0.1)
+        x = alt.X("correlation:Q", scale=alt.Scale(domain=[low, 1]),
+                  title=f"Correlation of {LABELS.get(result['x'], result['x'])} with {LABELS.get(result['y'], result['y'])}")
+        y = alt.Y(f"{group}:N", sort="-x", title=None, axis=alt.Axis(labelLimit=260))
+        bars = alt.Chart(frame).mark_bar().encode(
+            x=x, y=y,
+            color=alt.Color("direction:N", scale=alt.Scale(domain=["positive", "negative"], range=[BRAND, ACCENT]), legend=None),
+            opacity=alt.Opacity("sample:N", scale=alt.Scale(domain=["30 products or more", "fewer than 30 products"],
+                                                            range=[1.0, 0.4]),
+                                legend=alt.Legend(title="Lighter bars: few products - treat with caution", orient="bottom")),
+            tooltip=list(frame.columns))
+        labels = alt.Chart(frame).mark_text(fontSize=11, color="#1F2A44", dx=4, align="left").encode(
+            x=alt.X("plot_at:Q"), y=y, text=alt.Text("correlation:Q", format=".2f")).transform_calculate(
+            plot_at="max(datum.correlation, 0)")
+        return (bars + labels).properties(height=max(120, 28 * len(frame)))
     groups = result.get("group_by") or []
-    value = next((s for s in ("sum", "mean", "median", "max", "min") if s in frame), "products")
     if not groups:
         return None
-    title = f"{value} of {result.get('measure', '')}".replace("sum of", "Total").replace("mean of", "Average") if value != "products" else "Products"
-    if value != "products" and result.get("measure") in ("revenue", "mrp"):
-        title += " ($)"
-    encoding = dict(x=alt.X(f"{value}:Q", title=title.strip()), y=alt.Y(f"{groups[0]}:N", sort="-x", title=None),
-                    tooltip=list(frame.columns))
+    value = next((s for s in ("sum", "mean", "median", "max", "min") if s in frame), "products")
+    measure = result.get("measure", "")
+    money = value != "products" and measure in ("revenue", "mrp")
+    name = {"sum": "Total", "mean": "Average", "median": "Median", "max": "Highest", "min": "Lowest"}.get(value, "")
+    title = f"{name} {LABELS.get(measure, measure)}{' ($)' if money else ''}".strip() if value != "products" else "Products"
+    number_format = ("$.3~s" if value == "sum" else "$,.0f") if money else (",.0f" if value in ("products", "sum") else ",.1f")
+
     if len(groups) == 2:
-        encoding["color"] = alt.Color(f"{groups[1]}:N", legend=alt.Legend(orient="bottom", title=None))
-        encoding["yOffset"] = f"{groups[1]}:N"
-    chart = alt.Chart(frame).mark_bar(color=BRAND).encode(**encoding)
-    return chart.properties(height=min(26 * len(frame), 520))
+        first, second = groups
+        many = max(frame[first].nunique(), frame[second].nunique()) > 5
+        if many:
+            rows_dim, cols_dim = (first, second) if frame[first].nunique() >= frame[second].nunique() else (second, first)
+            middle = float(frame[value].max()) / 2
+            base = alt.Chart(frame).encode(
+                x=alt.X(f"{cols_dim}:N", title=None, axis=alt.Axis(orient="top", labelAngle=0)),
+                y=alt.Y(f"{rows_dim}:N", title=None,
+                        sort=alt.EncodingSortField(field=value, op="sum", order="descending")))
+            cells = base.mark_rect(stroke="white", strokeWidth=2).encode(
+                color=alt.Color(f"{value}:Q", scale=alt.Scale(scheme="greens"), legend=alt.Legend(title=title, orient="bottom")),
+                tooltip=list(frame.columns))
+            text = base.mark_text(fontSize=12).encode(
+                text=alt.Text(f"{value}:Q", format=number_format),
+                color=alt.condition(alt.datum[value] > middle, alt.value("white"), alt.value("#1F2A44")))
+            return (cells + text).properties(height=max(160, 30 * frame[rows_dim].nunique()))
+        bars = alt.Chart(frame).mark_bar().encode(
+            x=alt.X(f"{value}:Q", title=title), y=alt.Y(f"{first}:N", title=None), yOffset=f"{second}:N",
+            color=alt.Color(f"{second}:N", legend=alt.Legend(orient="bottom", title=LABELS.get(second, second))),
+            tooltip=list(frame.columns))
+        return bars.properties(height=min(24 * len(frame), 560))
+
+    bars = alt.Chart(frame).mark_bar(color=BRAND).encode(
+        x=alt.X(f"{value}:Q", title=title), y=alt.Y(f"{groups[0]}:N", sort="-x", title=LABELS.get(groups[0], groups[0])),
+        tooltip=list(frame.columns))
+    labels = bars.mark_text(align="left", dx=4, fontSize=11, color="#1F2A44").encode(
+        text=alt.Text(f"{value}:Q", format=number_format))
+    return (bars + labels).properties(height=max(120, 28 * len(frame)))
+
+
+def relationship_heatmap(calls):
+    """Several relationships for the same grouping (e.g. MRP, weight and display share vs revenue by category) in one
+    heatmap: rows = groups, columns = measures, the correlation written in each cell."""
+    group = calls[0]["result"]["group_by"]
+    frame = pd.concat([pd.DataFrame(c["result"]["rows"]).assign(
+        measure=f"{LABELS.get(c['result']['x'], c['result']['x'])} vs {LABELS.get(c['result']['y'], c['result']['y'])}")
+        for c in calls], ignore_index=True).dropna(subset=["correlation"])
+    base = alt.Chart(frame).encode(x=alt.X("measure:N", title=None, axis=alt.Axis(orient="top", labelAngle=0, labelLimit=220)),
+                                   y=alt.Y(f"{group}:N", title=None, axis=alt.Axis(labelLimit=260)))
+    cells = base.mark_rect(stroke="white", strokeWidth=2).encode(
+        color=alt.Color("correlation:Q", scale=alt.Scale(scheme="redyellowgreen", domain=[-1, 1]),
+                        legend=alt.Legend(title="Correlation (-1 to 1)", orient="bottom")),
+        tooltip=list(frame.columns))
+    text = base.mark_text(fontSize=12, color="#1F2A44").encode(text=alt.Text("correlation:Q", format=".2f"))
+    return (cells + text).properties(height=max(160, 28 * frame[group].nunique()))
+
+
+def answer_charts(calls):
+    """Charts for one answer: relationship results that share a grouping are merged into one heatmap; others are
+    drawn one by one (at most four charts)."""
+    chart_calls = [c for c in calls if c["tool"] in core.CHART_TOOLS and isinstance(c["result"], dict) and c["result"].get("rows")]
+    charts, relationships = [], {}
+    for c in chart_calls:
+        group = c["result"].get("group_by") if c["tool"] == "data_relationship" else None
+        if group:
+            relationships.setdefault((group, json.dumps(c["result"].get("filters"), sort_keys=True)), []).append(c)
+        else:
+            charts.append(data_chart(c))
+    for same in relationships.values():
+        charts.append(relationship_heatmap(same) if len(same) > 1 else data_chart(same[0]))
+    return [c for c in charts if c is not None][:4]
 
 
 def predict_batch(frame):
@@ -226,10 +369,8 @@ if ASSISTANT_ON:
             with st.chat_message(role):
                 st.markdown(md_safe(text))
                 if role == "assistant":
-                    for c in [c for c in calls if c["tool"] in core.CHART_TOOLS][:2]:
-                        chart = data_chart(c)
-                        if chart is not None:
-                            st.altair_chart(chart, use_container_width=True)
+                    for chart in answer_charts(calls):
+                        st.altair_chart(chart, use_container_width=True)
                     trace_badge(untraced)
                     read_aloud(text, f"chat{i}")
                     if calls:
